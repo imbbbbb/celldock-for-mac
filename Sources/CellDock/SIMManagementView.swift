@@ -68,6 +68,15 @@ struct SIMManagementView: View {
         .onChange(of: selectedEUICC.cardKind) { _, cardKind in
             if cardKind != .eUICC, selection == .esim { selection = .sim }
         }
+        .onChange(of: selection) { _, _ in
+            // Hand focus to the pane list on every switch. The AT terminal pane
+            // holds first responder in its command field; releasing it without
+            // a destination lets AppKit pick the next focusable view in the
+            // incoming pane, which draws a focus ring around something the user
+            // never interacted with. Directing focus somewhere expected is what
+            // actually prevents that, rather than clearing it and hoping.
+            listFocused = true
+        }
         .task(id: selectedModuleID) {
             previousOverviewCounters = nil
             overviewThroughput = .zero

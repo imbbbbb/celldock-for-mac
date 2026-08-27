@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Hardened Runtime denies these resources outright unless they are declared
+	  here. Without the declaration the system refuses the request without ever
+	  showing a prompt, so the app never appears under Privacy and Security and
+	  the user cannot grant access manually either.
+
+	  Microphone: call audio is captured on the Mac and sent over the module.
+	  Address book: contact names are matched against SMS and call numbers.
+	-->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.personal-information.addressbook</key>
+	<true/>
+</dict>
+</plist>

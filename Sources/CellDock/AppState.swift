@@ -326,7 +326,8 @@ final class AppState: ObservableObject {
             return [
                 CellularModuleSummary(
                     id: id,
-                    displayName: L10n.tr("模组 %lld", Int64(1)),
+                    displayName: ModuleLabelStore.label(forIMEI: modem.moduleIMEI)
+                        ?? L10n.tr("模组 %lld", Int64(1)),
                     modem: modem,
                     network: network,
                     cardKind: euicc.cardKind,
@@ -354,7 +355,8 @@ final class AppState: ObservableObject {
                 : (auxiliaryEUICCSnapshots[device.locationID]?.cardKind ?? .unknown)
             return CellularModuleSummary(
                 id: device.moduleID,
-                displayName: L10n.tr("模组 %lld", Int64(index + 1)),
+                displayName: ModuleLabelStore.label(forIMEI: moduleSnapshot.moduleIMEI)
+                    ?? L10n.tr("模组 %lld", Int64(index + 1)),
                 modem: moduleSnapshot,
                 network: networkStatus(for: device.moduleID),
                 cardKind: cardKind,
@@ -2012,7 +2014,10 @@ final class AppState: ObservableObject {
     }
 
     func configureECM() {
-        guard !isConfiguringECM else { return }
+        // Both of these end in a module restart, so they must not be queued
+        // together: whichever runs first closes the AT handle, leaving the
+        // other to fail with a bewildering "module disconnected".
+        guard !isConfiguringECM, !isConvertingModuleIdentity else { return }
         isConfiguringECM = true
         dismissTransientMessage()
         primaryDataModemService.configureECM { [weak self] result in
@@ -2023,14 +2028,104 @@ final class AppState: ObservableObject {
     }
 
     func convertDJIModuleIdentity() {
-        guard !isConvertingModuleIdentity else { return }
+        switchToMode(.macFull)
+    }
+
+    /// Switches the connected module to `mode`.
+    ///
+    /// Shares `isConvertingModuleIdentity` with the legacy conversion entry
+    /// point so the UI keeps a single busy state for any configuration write —
+    /// two concurrent writes to USBCFG is exactly what must never happen.
+    func switchToMode(_ mode: ModemMode, moduleID: CellularModuleID? = nil) {
+        // Mutually exclusive with the ECM write for the same reason: two
+        // restarts must never be in flight at once.
+        guard !isConvertingModuleIdentity, !isConfiguringECM else { return }
+        // A switch ends in a module restart, which would leave an in-flight SMS
+        // in an unknown state. ModemService blocks eSIM writes for the same
+        // reason; sending state only exists up here, so this is where it has to
+        // be checked. Scoped to the target module: one module sending a message
+        // is no reason to refuse switching a different one.
+        guard !isSendingMessage(via: moduleID) else {
+            show(.failure(L10n.tr("短信正在发送，请等待发送完成后再切换模式。")))
+            return
+        }
+        guard let service = modemService(for: moduleID) else {
+            show(.failure(L10n.tr("请先插入 QDC507 模块。")))
+            return
+        }
         isConvertingModuleIdentity = true
         dismissTransientMessage()
-        modemService.convertDJIModuleIdentity { [weak self] result in
+        service.switchToMode(mode) { [weak self] result in
             guard let self else { return }
             self.isConvertingModuleIdentity = false
             self.show(result)
         }
+    }
+
+    /// The configuration this module was last seen working in, captured before
+    /// the most recent mode switch overwrote it. Looked up by IMEI so it follows
+    /// the physical module rather than whichever USB identity it reports now.
+    func lastVerifiedConfigurationSnapshot(
+        for moduleID: CellularModuleID? = nil
+    ) -> ModeConfigurationSnapshot? {
+        ModeConfigurationSnapshotStore.snapshot(
+            forIMEI: communicationModuleSnapshot(moduleID).moduleIMEI
+        )
+    }
+
+    /// Returns the module to that configuration. Runs through the same
+    /// transaction as any other switch — unlock, write, exact read-back — so a
+    /// rollback is no less verified than the switch that made it necessary.
+    func restoreLastVerifiedConfiguration(moduleID: CellularModuleID? = nil) {
+        guard let mode = lastVerifiedConfigurationSnapshot(for: moduleID)?.mode else { return }
+        switchToMode(mode, moduleID: moduleID)
+    }
+
+    /// Releases the Mac's microphone and speaker from a call media path that
+    /// did not tear down cleanly.
+    ///
+    /// Unlike a mode switch this is allowed during a call: a wedged audio path
+    /// is precisely when it is needed, and the call itself is left alone.
+    func forceReleaseCallAudio(moduleID: CellularModuleID? = nil) {
+        guard let service = modemService(for: moduleID) else {
+            show(.failure(L10n.tr("请先插入 QDC507 模块。")))
+            return
+        }
+        dismissTransientMessage()
+        service.forceReleaseCallAudio { [weak self] result in
+            self?.show(result)
+        }
+    }
+
+    /// The user's label for a physical module, or nil when it has none.
+    func moduleLabel(forIMEI imei: String?) -> String? {
+        ModuleLabelStore.label(forIMEI: imei)
+    }
+
+    /// Assigns or clears a module's label.
+    ///
+    /// `cellularModules` is a computed property, so the new label only reaches
+    /// the UI once observers are told to re-read it.
+    func setModuleLabel(_ label: String?, forIMEI imei: String?) {
+        guard imei != nil else { return }
+        ModuleLabelStore.setLabel(label, forIMEI: imei)
+        objectWillChange.send()
+    }
+
+    /// Recent mode-switch attempts, newest first. Failed and refused attempts
+    /// are included — they are the ones worth reading.
+    var modeSwitchLog: [ModeSwitchLogEntry] {
+        ModeSwitchLogStore.recentEntries(limit: 10)
+    }
+
+    /// Text of the diagnostic report for the currently connected module.
+    func makeDiagnosticReport(for moduleID: CellularModuleID? = nil) -> String {
+        ModuleDiagnosticReport.generate(
+            snapshot: communicationModuleSnapshot(moduleID),
+            lastVerified: lastVerifiedConfigurationSnapshot(for: moduleID),
+            log: ModeSwitchLogStore.recentEntries(limit: 50),
+            generatedAt: Date()
+        )
     }
 
     func setHideMenuBarIconWhenDisconnected(_ enabled: Bool) {
@@ -2443,7 +2538,29 @@ final class AppState: ObservableObject {
         delete(message, automatically: false)
     }
 
-    private func delete(_ message: SMSMessage, automatically: Bool) {
+    /// Deletes every message in a conversation, including the copies still on
+    /// the module.
+    ///
+    /// Each message is deleted individually rather than in one sweep: they can
+    /// sit in different storages and at different indices on the modem, and a
+    /// concatenated message spans several of them. `delete(_:)` already guards
+    /// against deleting the same message twice.
+    func deleteConversation(_ conversation: MessageConversation) {
+        let count = conversation.messages.count
+        guard count > 0 else { return }
+        for message in conversation.messages {
+            delete(message, automatically: false, announcing: false)
+        }
+        presentTransientMessage(L10n.tr("已删除 %lld 条短信。", Int64(count)))
+    }
+
+    /// `announcing` is false for bulk deletion, which reports once at the end
+    /// instead of firing a transient message per message.
+    private func delete(
+        _ message: SMSMessage,
+        automatically: Bool,
+        announcing: Bool = true
+    ) {
         guard let currentMessage = messageStore.messages.first(where: { $0.id == message.id }),
               deletingMessageIDs.insert(currentMessage.id).inserted else {
             return
@@ -2453,7 +2570,9 @@ final class AppState: ObservableObject {
             messageStore.remove(id: currentMessage.id)
             messages = messageStore.messages
             verificationAutoDeleteRetryDates.removeValue(forKey: currentMessage.id)
-            presentTransientMessage(L10n.tr("短信已删除。"))
+            if announcing {
+                presentTransientMessage(L10n.tr("短信已删除。"))
+            }
             if references.isEmpty {
                 deletingMessageIDs.remove(currentMessage.id)
                 DispatchQueue.main.async { [weak self] in self?.scheduleVerificationAutoDelete() }

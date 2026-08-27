@@ -9,6 +9,7 @@ enum PhoneWindowSection: String, CaseIterable, Identifiable {
     case recordings
     case proxy
     case sim
+    case moduleMode
     case settings
 
     var id: String { rawValue }
@@ -22,6 +23,7 @@ enum PhoneWindowSection: String, CaseIterable, Identifiable {
         case .recordings: return L10n.tr("通话录音")
         case .proxy: return L10n.tr("代理")
         case .sim: return L10n.tr("SIM 卡")
+        case .moduleMode: return L10n.tr("模块模式")
         case .settings: return L10n.tr("设置")
         }
     }
@@ -35,6 +37,7 @@ enum PhoneWindowSection: String, CaseIterable, Identifiable {
         case .recordings: return "waveform"
         case .proxy: return "point.forward.to.point.capsulepath"
         case .sim: return "simcard"
+        case .moduleMode: return "arrow.left.arrow.right.circle"
         case .settings: return "gearshape"
         }
     }
@@ -334,6 +337,7 @@ final class CommunicationWindowController: NSObject, NSWindowDelegate {
         case .recordings: return L10n.tr("通话录音")
         case .proxy: return L10n.tr("代理")
         case .sim: return L10n.tr("SIM 卡")
+        case .moduleMode: return L10n.tr("模块模式")
         case .settings: return L10n.tr("设置")
         }
     }

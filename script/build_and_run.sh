@@ -56,6 +56,7 @@ BIN_DIR="$(xcrun swift build --disable-sandbox -Xswiftc -disable-sandbox --show-
 mkdir -p \
   "$APP_MACOS" \
   "$APP_RESOURCES" \
+  "$APP_CONTENTS/Frameworks" \
   "$HELPER_DIR" \
   "$DAEMON_DIR"
 cp "$ROOT_DIR/Resources/Info.plist" "$APP_CONTENTS/Info.plist"
@@ -80,10 +81,26 @@ if [[ -n "$SUPABASE_KEY_VALUE" ]]; then
 fi
 cp "$BIN_DIR/CellDock" "$APP_BINARY"
 cp "$BIN_DIR/CellDockNetworkHelper" "$HELPER_DIR/CellDockNetworkHelper"
-cp "$ROOT_DIR/Resources/app.mavo.celldock.network.helper.plist" \
-  "$DAEMON_DIR/app.mavo.celldock.network.helper.plist"
+cp "$ROOT_DIR/Resources/app.celldock.mac.network.helper.plist" \
+  "$DAEMON_DIR/app.celldock.mac.network.helper.plist"
 cp "$ROOT_DIR/Resources/CellDock.icns" "$APP_RESOURCES/CellDock.icns"
+cp "$ROOT_DIR/Resources/sim.svg" "$APP_RESOURCES/sim.svg"
+cp "$ROOT_DIR/Resources/sim1.svg" "$APP_RESOURCES/sim1.svg"
+cp "$ROOT_DIR/Resources/celldock-module-vertical.svg" \
+  "$APP_RESOURCES/celldock-module-vertical.svg"
 cp -R "$ROOT_DIR/Resources/Localization/"*.lproj "$APP_RESOURCES/"
+mkdir -p "$APP_RESOURCES/Sounds"
+cp "$ROOT_DIR/Resources/Sounds/bleeps.wav" "$APP_RESOURCES/Sounds/bleeps.wav"
+cp "$ROOT_DIR/Resources/Sounds/ring.mp3" "$APP_RESOURCES/Sounds/ring.mp3"
+# CellDock links Sparkle and its rpath points at Contents/Frameworks. Without
+# the embedded framework dyld terminates the process the instant it launches,
+# which looks exactly like a silent startup failure.
+SPARKLE_FRAMEWORK_SOURCE="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+[[ -d "$SPARKLE_FRAMEWORK_SOURCE" ]] || {
+  print -u2 "SwiftPM did not resolve the Sparkle framework: $SPARKLE_FRAMEWORK_SOURCE"
+  exit 1
+}
+ditto "$SPARKLE_FRAMEWORK_SOURCE" "$APP_CONTENTS/Frameworks/Sparkle.framework"
 if [[ -d "$ROOT_DIR/Resources/ModuleVoice" ]]; then
   xcrun swift "$ROOT_DIR/scripts/build_module_voice_payload.swift" \
     "$ROOT_DIR/Resources/ModuleVoice" \
@@ -101,10 +118,30 @@ fi
 }
 
 xattr -cr "$APP_BUNDLE"
+# Nested code has to be signed inside-out: Sparkle ships with its own Developer
+# ID signature, and leaving it mixed with the outer signature fails
+# `codesign --verify --deep --strict`.
+SPARKLE_VERSION="$APP_CONTENTS/Frameworks/Sparkle.framework/Versions/B"
+[[ ! -e "$SPARKLE_VERSION/XPCServices/Installer.xpc" ]] || \
+  codesign --force --sign "$SIGN_IDENTITY" --timestamp=none \
+    "$SPARKLE_VERSION/XPCServices/Installer.xpc"
+[[ ! -e "$SPARKLE_VERSION/XPCServices/Downloader.xpc" ]] || \
+  codesign --force --sign "$SIGN_IDENTITY" --timestamp=none \
+    --preserve-metadata=entitlements \
+    "$SPARKLE_VERSION/XPCServices/Downloader.xpc"
+[[ ! -e "$SPARKLE_VERSION/Autoupdate" ]] || \
+  codesign --force --sign "$SIGN_IDENTITY" --timestamp=none \
+    "$SPARKLE_VERSION/Autoupdate"
+[[ ! -e "$SPARKLE_VERSION/Updater.app" ]] || \
+  codesign --force --sign "$SIGN_IDENTITY" --timestamp=none \
+    "$SPARKLE_VERSION/Updater.app"
 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none \
-  --identifier app.mavo.celldock.network.helper \
+  "$APP_CONTENTS/Frameworks/Sparkle.framework"
+codesign --force --sign "$SIGN_IDENTITY" --timestamp=none \
+  --identifier app.celldock.mac.network.helper \
   "$HELPER_DIR/CellDockNetworkHelper"
 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none \
+  --entitlements "$ROOT_DIR/Resources/CellDock.entitlements" \
   --identifier "$BUNDLE_ID" "$APP_BUNDLE"
 codesign --verify --deep --strict "$APP_BUNDLE"
 

@@ -1318,14 +1318,373 @@ do {
         ) == .disabled,
         "disabled cellular service did not override active interface state"
     )
+    // The DJI stock configuration is a supported mode, not a state to be
+    // converted away from: it is what makes the module visible to DJOneHub.
+    // With usbnet=0 it still needs CDC-ECM before macOS can route over it.
     try expect(
         ModemSnapshot(
             state: .connected,
             usbIdentity: "2CA3:4006",
             usbNetMode: 0,
             usbConfiguration: djiUSBConfiguration
-        ).initialSetupState == .needsIdentityConversion,
-        "exact DJI identity was not offered one-click conversion"
+        ).initialSetupState == .needsECM,
+        "DJI stock mode with usbnet=0 was not offered ECM initialization"
+    )
+    try expect(
+        ModemSnapshot(
+            state: .connected,
+            usbIdentity: "2CA3:4006",
+            usbNetMode: 1,
+            usbConfiguration: djiUSBConfiguration
+        ).initialSetupState == .ready,
+        "DJI stock mode was blocked from the main UI"
+    )
+    // The iPhone/iPad mode differs from the Mac mode only in the audio flag.
+    // Refusing it here is exactly the bug that stranded the module: the setup
+    // page would not release, so the recovery entry point went with it.
+    try expect(
+        ModemSnapshot(
+            state: .connected,
+            usbIdentity: "2C7C:0125",
+            usbNetMode: 1,
+            usbConfiguration: .mobileDataOnly
+        ).initialSetupState == .ready,
+        "audio-less iPhone/iPad mode was blocked from the main UI"
+    )
+    try expect(
+        ModemUSBConfiguration.mobileDataOnly.mode == .mobileDataOnly
+            && ModemUSBConfiguration.maVoTarget.mode == .macFull
+            && ModemUSBConfiguration.djiStock.mode == .djiStock,
+        "mode lookup did not round-trip through the whitelist"
+    )
+    try expect(
+        ModemUSBConfiguration.maVoTargetWithoutADB.mode == nil,
+        "a transitional tuple was mistaken for a switchable mode"
+    )
+    try expect(
+        ModemUSBConfiguration.mobileDataOnly.usbcfgWriteCommand ==
+            "AT+QCFG=\"USBCFG\",0x2C7C,0x0125,1,1,1,1,1,1,0",
+        "iPhone/iPad mode USBCFG write command"
+    )
+    try expect(
+        ModemUSBConfiguration.djiStock.usbcfgWriteCommand ==
+            "AT+QCFG=\"USBCFG\",0x2CA3,0x4006,1,1,1,1,1,0,0",
+        "DJI stock mode USBCFG write command"
+    )
+
+    // The restart gate. `VerifiedModeWrite.verify` is the only way to obtain the
+    // credential the restart path demands, so these assertions are the whole of
+    // what stands between a mismatched write and an unrecoverable AT+CFUN=1,1.
+    try expect(
+        VerifiedModeWrite.verify(
+            target: .macFull,
+            readBackConfiguration: .maVoTarget,
+            readBackUSBNetMode: 1
+        )?.mode == .macFull,
+        "an exact read-back did not produce a verified write for the target mode"
+    )
+    // macFull and mobileDataOnly differ only in the audio flag. A read-back that
+    // landed on the neighbouring mode must never pass as success.
+    try expect(
+        VerifiedModeWrite.verify(
+            target: .macFull,
+            readBackConfiguration: .mobileDataOnly,
+            readBackUSBNetMode: 1
+        ) == nil,
+        "a one-flag mismatch was accepted as a verified write"
+    )
+    try expect(
+        VerifiedModeWrite.verify(
+            target: .macFull,
+            readBackConfiguration: .maVoTargetWithoutADB,
+            readBackUSBNetMode: 1
+        ) == nil,
+        "a transitional read-back was accepted as a verified write"
+    )
+    try expect(
+        VerifiedModeWrite.verify(
+            target: .djiStock,
+            readBackConfiguration: .djiStock,
+            readBackUSBNetMode: 0
+        ) == nil,
+        "usbnet=0 was accepted as a verified write"
+    )
+    try expect(
+        VerifiedModeWrite.verify(
+            target: .macFull,
+            readBackConfiguration: nil,
+            readBackUSBNetMode: 1
+        ) == nil,
+        "an unparsable USBCFG read-back was accepted as a verified write"
+    )
+    try expect(
+        VerifiedModeWrite.verify(
+            target: .macFull,
+            readBackConfiguration: .maVoTarget,
+            readBackUSBNetMode: nil
+        ) == nil,
+        "an unparsable usbnet read-back was accepted as a verified write"
+    )
+
+    // Firmware capability comes from the verified table, never from the module's
+    // own AT+QPCMV=? advertisement: the verified QDC507 firmware advertises
+    // (0,1),(0-2) while QPCMV? and QPCMV=0 both return ERROR.
+    let verifiedRevision = "QDC507GLEFM21_01.001.01.007"
+    try expect(
+        ModemFirmwareCapability.backend(forRevision: verifiedRevision) == .qdcADBHelper,
+        "verified QDC507 firmware did not map to the ADB helper backend"
+    )
+    try expect(
+        !ModemFirmwareCapability.allowsStandardQPCMV(revision: verifiedRevision),
+        "custom QDC firmware was cleared to receive standard QPCMV"
+    )
+    try expect(
+        ModemFirmwareCapability.backend(forRevision: "QDC507GLEFM21_99.999.99.999")
+            == .unsupported,
+        "unknown firmware was not treated as unsupported"
+    )
+    try expect(
+        ModemFirmwareCapability.backend(forRevision: nil) == .unsupported,
+        "absent firmware revision was not treated as unsupported"
+    )
+    try expect(
+        ModemFirmwareCapability.isVerified(revision: "  qdc507glefm21_01.001.01.007  "),
+        "firmware lookup was not tolerant of case and surrounding whitespace"
+    )
+    // Verified firmware is trusted without consulting the advertisement at all.
+    try expect(
+        ModemFirmwareCapability.permitsEnablingUSBAudio(
+            revision: verifiedRevision,
+            advertisesUACMode: nil
+        ),
+        "verified firmware was refused USB audio because the QPCMV query never ran"
+    )
+    // Unknown firmware falls back to the advertisement, and a failed query is
+    // not permission.
+    try expect(
+        !ModemFirmwareCapability.permitsEnablingUSBAudio(
+            revision: nil,
+            advertisesUACMode: nil
+        ),
+        "unknown firmware was allowed to enable USB audio with no evidence at all"
+    )
+    try expect(
+        ModemFirmwareCapability.permitsEnablingUSBAudio(
+            revision: nil,
+            advertisesUACMode: true
+        ),
+        "unknown firmware advertising UAC support was refused"
+    )
+
+    // The diagnostic report is a pure function of its inputs, so it can be
+    // checked with no module attached. It exists to be pasted into a bug
+    // report, so what matters is that the facts a reader needs are present —
+    // and that it degrades cleanly when there is no history yet.
+    let reportSnapshot = ModemSnapshot(
+        state: .connected,
+        usbIdentity: "2C7C:0125",
+        moduleIMEI: "000000000000000",
+        firmwareRevision: verifiedRevision,
+        usbNetMode: 1,
+        usbConfiguration: .maVoTarget
+    )
+    let emptyReport = ModuleDiagnosticReport.generate(
+        snapshot: reportSnapshot,
+        lastVerified: nil,
+        log: [],
+        generatedAt: Date(timeIntervalSince1970: 0)
+    )
+    try expect(
+        emptyReport.contains("2C7C:0125,1,1,1,1,1,1,1"),
+        "diagnostic report omitted the current USBCFG"
+    )
+    try expect(
+        emptyReport.contains("000000000000000"),
+        "diagnostic report omitted the IMEI"
+    )
+    try expect(
+        emptyReport.contains("qdcADBHelper"),
+        "diagnostic report omitted the resolved media backend"
+    )
+    try expect(
+        emptyReport.contains("(none recorded)")
+            && emptyReport.contains("(no switches recorded)"),
+        "diagnostic report did not degrade cleanly with no history"
+    )
+
+    let loggedReport = ModuleDiagnosticReport.generate(
+        snapshot: reportSnapshot,
+        lastVerified: ModeConfigurationSnapshot(
+            configuration: .djiStock,
+            usbNetMode: 1,
+            firmwareRevision: verifiedRevision,
+            imei: "000000000000000",
+            recordedAt: Date(timeIntervalSince1970: 0)
+        ),
+        log: [
+            ModeSwitchLogEntry(
+                id: UUID(),
+                startedAt: Date(timeIntervalSince1970: 0),
+                finishedAt: Date(timeIntervalSince1970: 12),
+                targetMode: .macFull,
+                succeeded: false,
+                detail: "写入后的精确回读校验失败，未重启模块。"
+            )
+        ],
+        generatedAt: Date(timeIntervalSince1970: 100)
+    )
+    try expect(
+        loggedReport.contains("2CA3:4006,1,1,1,1,1,0,0"),
+        "diagnostic report omitted the last verified configuration"
+    )
+    try expect(
+        loggedReport.contains("FAIL") && loggedReport.contains("-> macFull"),
+        "diagnostic report omitted a failed switch attempt"
+    )
+    // The per-branch wording is what identifies where a transaction stopped, so
+    // it has to survive into the export verbatim.
+    try expect(
+        loggedReport.contains("写入后的精确回读校验失败，未重启模块。"),
+        "diagnostic report dropped the failure detail identifying the stage"
+    )
+
+    // The write-decision layer. These cover the two branches that cannot be
+    // safely reproduced on real hardware: a write whose outcome the transport
+    // could not determine, and a read-back that disagrees with the target.
+    var readBackWasIssued = false
+    let ambiguousDecision = ModeWriteDecision.decide(
+        target: .macFull,
+        write: .ambiguous
+    ) {
+        readBackWasIssued = true
+        return (configuration: .maVoTarget, usbNetMode: 1)
+    }
+    try expect(
+        ambiguousDecision == .indeterminate,
+        "an ambiguous write did not stop the transaction"
+    )
+    // An ambiguous write means the interface is probably gone. Issuing more
+    // commands against it tells us nothing, and the closure form is what makes
+    // skipping them expressible at all.
+    try expect(
+        !readBackWasIssued,
+        "an ambiguous write still issued a read-back over a likely-dead interface"
+    )
+
+    readBackWasIssued = false
+    let rejectedDecision = ModeWriteDecision.decide(
+        target: .macFull,
+        write: .rejected("模块拒绝写入目标 USB 配置。")
+    ) {
+        readBackWasIssued = true
+        return (configuration: .maVoTarget, usbNetMode: 1)
+    }
+    try expect(
+        rejectedDecision == .rejected("模块拒绝写入目标 USB 配置。"),
+        "a refused write was not reported as rejected"
+    )
+    try expect(
+        !readBackWasIssued,
+        "a refused write still issued a read-back although nothing changed"
+    )
+
+    let commitDecision = ModeWriteDecision.decide(target: .macFull, write: .succeeded) {
+        (configuration: .maVoTarget, usbNetMode: 1)
+    }
+    switch commitDecision {
+    case let .commit(verified):
+        try expect(
+            verified.mode == .macFull,
+            "the commit credential carried the wrong mode"
+        )
+    default:
+        try expect(false, "an exact read-back did not reach commit")
+    }
+
+    try expect(
+        ModeWriteDecision.decide(target: .macFull, write: .succeeded) {
+            (configuration: .mobileDataOnly, usbNetMode: 1)
+        } == .verificationFailed,
+        "a read-back landing on the neighbouring mode was allowed to commit"
+    )
+    try expect(
+        ModeWriteDecision.decide(target: .macFull, write: .succeeded) {
+            (configuration: nil, usbNetMode: nil)
+        } == .verificationFailed,
+        "an unreadable read-back was not treated as a verification failure"
+    )
+    try expect(
+        ModeWriteDecision.decide(target: .djiStock, write: .succeeded) {
+            (configuration: .djiStock, usbNetMode: 0)
+        } == .verificationFailed,
+        "usbnet=0 was allowed to commit"
+    )
+
+    // AT+QCFG="USBCFG" reports NV, not what the module is enumerated as, and a
+    // write only takes effect at the next restart. Conflating the two makes a
+    // switch whose restart never landed unrecoverable: every retry would see
+    // the stored target, short-circuit as already-done, and report success
+    // while the module stays on the old identity forever.
+    try expect(
+        ModemMode.macFull.isLive(
+            storedConfiguration: .maVoTarget,
+            storedUSBNetMode: 1,
+            enumeratedVendorID: 0x2C7C,
+            enumeratedProductID: 0x0125
+        ),
+        "a mode that is stored and enumerated was not recognised as live"
+    )
+    // Stored as macFull, still enumerated as the DJI identity: the write landed
+    // but the restart did not. This must NOT count as live, or the retry that
+    // would fix it gets skipped.
+    try expect(
+        !ModemMode.macFull.isLive(
+            storedConfiguration: .maVoTarget,
+            storedUSBNetMode: 1,
+            enumeratedVendorID: 0x2CA3,
+            enumeratedProductID: 0x4006
+        ),
+        "a pending configuration was mistaken for a live one"
+    )
+    try expect(
+        !ModemMode.macFull.isLive(
+            storedConfiguration: .mobileDataOnly,
+            storedUSBNetMode: 1,
+            enumeratedVendorID: 0x2C7C,
+            enumeratedProductID: 0x0125
+        ),
+        "the neighbouring mode was reported as live"
+    )
+    try expect(
+        !ModemMode.macFull.isLive(
+            storedConfiguration: .maVoTarget,
+            storedUSBNetMode: 0,
+            enumeratedVendorID: 0x2C7C,
+            enumeratedProductID: 0x0125
+        ),
+        "usbnet=0 was reported as live"
+    )
+
+    // A bogus revision makes verified firmware look unknown, which sends the
+    // audio gate back to the module's own AT+QPCMV=? claim — the one thing
+    // ModemFirmwareCapability exists because it cannot be trusted.
+    try expect(
+        ModemFirmwareCapability.revision(
+            fromResponseLines: ["AT+QGMR", verifiedRevision, "OK"]
+        ) == verifiedRevision,
+        "the firmware revision was not picked out of a clean response"
+    )
+    try expect(
+        ModemFirmwareCapability.revision(
+            fromResponseLines: ["RDY", "+CPIN: READY", "+QUSIM: 1", verifiedRevision, "OK"]
+        ) == verifiedRevision,
+        "a URC in the buffer was mistaken for the firmware revision"
+    )
+    try expect(
+        ModemFirmwareCapability.revision(
+            fromResponseLines: ["RDY", "+CPIN: READY", "OK"]
+        ) == nil,
+        "noise with no revision present still produced one"
     )
     try expect(
         ModemSnapshot(

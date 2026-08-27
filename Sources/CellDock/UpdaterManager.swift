@@ -36,11 +36,21 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
         }
     }
 
+    /// Pinned off for this fork.
+    ///
+    /// The setter used to write straight through to Sparkle, which persists the
+    /// value in its own preferences. With the updater unstarted that looks
+    /// harmless — but it arms the setting, so whoever re-enables the updater
+    /// later inherits automatic checks already switched on, pointing at an
+    /// appcast for the project this was forked from.
+    ///
+    /// Reporting false unconditionally also keeps the Settings toggle honest:
+    /// it shows the state that actually applies.
     var automaticallyChecksForUpdates: Bool {
-        get { controller.updater.automaticallyChecksForUpdates }
+        get { false }
         set {
-            objectWillChange.send()
-            controller.updater.automaticallyChecksForUpdates = newValue
+            // Ignored on purpose. Re-enabling updates takes more than a toggle:
+            // it needs an appcast that serves this build. See `start()`.
         }
     }
 
@@ -66,21 +76,31 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
             .assign(to: &$canCheckForUpdates)
     }
 
+    /// Deliberately does not start the updater.
+    ///
+    /// This build is a fork carrying the multi-mode rework. The upstream
+    /// appcast advertises the project it was forked from, so letting Sparkle
+    /// run would eventually offer an "update" that replaces this build with
+    /// one that has none of these changes — silently, and with no way back
+    /// short of rebuilding from source.
+    ///
+    /// Leaving the updater unstarted also keeps `canCheckForUpdates` false,
+    /// which disables the Check for Updates control in Settings instead of
+    /// letting it fail in the user's face.
     func start() {
-        #if !DEBUG
-        controller.startUpdater()
-        #endif
+        // Intentionally empty. See the note above before re-enabling: doing so
+        // requires an appcast that serves *this* build, not upstream's.
     }
 
     func checkForUpdates() {
-        #if !DEBUG
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        controller.checkForUpdates(nil)
-        #endif
+        // No-op for the same reason. The control that calls this is disabled
+        // anyway, since the updater was never started.
     }
 
+    /// Returns nil so that Sparkle has nowhere to look even if the updater is
+    /// somehow started. This delegate overrides `SUFeedURL` in Info.plist, so
+    /// it — not the plist — is what actually decides.
     nonisolated func feedURLString(for updater: SPUUpdater) -> String? {
-        MainActor.assumeIsolated { channel.feedURL }
+        nil
     }
 }

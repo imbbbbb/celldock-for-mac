@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum CommunicationRailIconKind {
-    case messages, recents, recordings, proxy, sim, settings
+    case messages, recents, recordings, proxy, sim, moduleMode, settings
 }
 
 struct AnimatedCommunicationRailButton: View {
@@ -80,7 +80,7 @@ struct AnimatedCommunicationRailButton: View {
                 rotationDegrees += 360
             }
             return
-        case .messages, .recents, .recordings, .sim:
+        case .messages, .recents, .recordings, .sim, .moduleMode:
             break
         }
 
@@ -122,6 +122,7 @@ private struct CommunicationRailIcon: View {
         case .recordings: recordingIcon
         case .proxy: globeIcon
         case .sim: simIcon
+        case .moduleMode: moduleModeIcon
         case .settings: settingsIcon
         }
     }
@@ -186,6 +187,18 @@ private struct CommunicationRailIcon: View {
         }
     }
 
+    /// Two arrows passing in opposite directions — the module moving between
+    /// hosts. They slide apart on hover so the motion reads as a swap rather
+    /// than a refresh, which is what the rotating proxy and settings icons mean.
+    private var moduleModeIcon: some View {
+        ZStack {
+            RailIconStroke(.modeArrowForward)
+                .offset(x: hover * 1.1 + impulse * 1.8)
+            RailIconStroke(.modeArrowBack)
+                .offset(x: -hover * 1.1 - impulse * 1.8)
+        }
+    }
+
     private var settingsIcon: some View {
         ZStack {
             RailIconStroke(.cogSpokes)
@@ -234,6 +247,7 @@ private enum RailIconLayer {
     case microphone, microphoneStem
     case globeOuter, globeMeridian, globeEquator
     case simOuter, simChip, simContacts
+    case modeArrowForward, modeArrowBack
     case cogSpokes, cogOuter, cogHub
 }
 
@@ -302,6 +316,12 @@ private struct RailIconPath: Shape {
         case .simChip: path.addRoundedRect(in: box(8, 10, 8, 8), cornerSize: CGSize(width: 1, height: 1))
         case .simContacts:
             line(&path, (8, 14), (16, 14)); line(&path, (12, 14), (12, 18))
+        case .modeArrowForward:
+            line(&path, (3, 9), (18, 9))
+            path.move(to: p(14.5, 5.5)); path.addLine(to: p(18, 9)); path.addLine(to: p(14.5, 12.5))
+        case .modeArrowBack:
+            line(&path, (6, 15), (21, 15))
+            path.move(to: p(9.5, 11.5)); path.addLine(to: p(6, 15)); path.addLine(to: p(9.5, 18.5))
         case .cogOuter: path.addEllipse(in: box(4, 4, 16, 16))
         case .cogHub: path.addEllipse(in: box(10, 10, 4, 4))
         case .cogSpokes:

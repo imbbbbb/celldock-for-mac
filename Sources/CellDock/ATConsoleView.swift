@@ -7,10 +7,14 @@ struct ATConsoleView: View {
     private let onClose: (() -> Void)?
     private let embedded: Bool
     private let targetModuleID: CellularModuleID?
-    @State private var command = "AT"
+    @State private var command = ""
     @State private var results: [ATConsoleExecutionResult] = []
     @State private var localError: String?
-    @FocusState private var commandFocused: Bool
+    @State private var commandFocused = false
+    @State private var hostWindow: NSWindow?
+    /// Whether this console is the one that suspended background dragging, so
+    /// it only hands the setting back if it actually took it away.
+    @State private var didSuspendBackgroundDragging = false
 
     private let suggestions = [
         "AT", "ATI", "AT+CSQ", "AT+QCSQ", "AT+COPS?", "AT+CPIN?"
@@ -47,7 +51,27 @@ struct ATConsoleView: View {
                 .frame(width: 700, height: 560)
             }
         }
-        .onAppear { commandFocused = true }
+        .background(WindowAccessor(window: $hostWindow))
+        .onChange(of: hostWindow) { _, window in
+            suspendBackgroundDragging(on: window)
+        }
+        .onAppear {
+            // This console writes directly to the module, so a command left
+            // over from a previous visit must never sit one Return away from
+            // being sent. SwiftUI keeps this view's state across section
+            // switches, so clearing on appear is what actually guarantees it.
+            command = ""
+            localError = nil
+            commandFocused = true
+            suspendBackgroundDragging(on: hostWindow)
+        }
+        .onDisappear {
+            commandFocused = false
+            if didSuspendBackgroundDragging {
+                hostWindow?.isMovableByWindowBackground = true
+                didSuspendBackgroundDragging = false
+            }
+        }
     }
 
     private var consoleContent: some View {
@@ -101,12 +125,14 @@ struct ATConsoleView: View {
     private var commandArea: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                TextField("例如 AT+QCSQ", text: $command)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.body.monospaced())
-                    .frame(minWidth: 0)
-                    .focused($commandFocused)
-                    .onSubmit { execute() }
+                DragResistantTextField(
+                    text: $command,
+                    placeholder: L10n.tr("例如 AT+QCSQ"),
+                    focus: $commandFocused,
+                    isMonospaced: true,
+                    onSubmit: { execute() }
+                )
+                .frame(minWidth: 0, minHeight: 22)
                 Button {
                     execute()
                 } label: {
@@ -165,6 +191,10 @@ struct ATConsoleView: View {
                     .font(.headline)
                 Spacer()
                 if !results.isEmpty {
+                    Button(L10n.tr("复制全部")) { copyAll() }
+                        .adaptiveGlassButton()
+                        .controlSize(.small)
+                        .help(L10n.tr("复制全部执行记录"))
                     Button("清空") { results.removeAll() }
                         .adaptiveGlassButton()
                         .controlSize(.small)
@@ -287,6 +317,10 @@ struct ATConsoleView: View {
             if !result.isSuccess, result.output.isEmpty {
                 localError = result.error
             }
+            // Terminal convention: the command has moved into the log, so the
+            // input line clears. It also means nothing stale can be left behind
+            // when the user navigates away.
+            command = ""
             commandFocused = true
         }
     }
@@ -296,13 +330,40 @@ struct ATConsoleView: View {
     }
 
     private func copy(_ result: ATConsoleExecutionResult) {
-        let text = [
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(transcript(for: result), forType: .string)
+    }
+
+    /// Copies the whole log in the order it is displayed, so what lands on the
+    /// clipboard matches what the user is looking at. SwiftUI cannot extend a
+    /// text selection across separate `Text` views, so without this the only
+    /// way to collect a session is one entry at a time.
+    private func copyAll() {
+        let text = results.map(transcript(for:)).joined(separator: "\n\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func transcript(for result: ATConsoleExecutionResult) -> String {
+        [
             "> \(result.command)",
             result.output,
             result.error.map { L10n.tr("错误：%@", $0) }
         ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Suspends the window's background dragging while the console is on screen.
+    ///
+    /// The communication window has no visible title bar, so it opts into
+    /// `isMovableByWindowBackground` to stay draggable. In a console that turns
+    /// a drag across the command line into a window drag, which makes selecting
+    /// text impossible. Overriding `mouseDownCanMoveWindow` on the field should
+    /// be enough on its own; this is the belt to that pair of braces, and it is
+    /// scoped to the console — every other section keeps background dragging.
+    private func suspendBackgroundDragging(on window: NSWindow?) {
+        guard let window, window.isMovableByWindowBackground else { return }
+        didSuspendBackgroundDragging = true
+        window.isMovableByWindowBackground = false
     }
 
     private func close() {
@@ -313,3 +374,22 @@ struct ATConsoleView: View {
         }
     }
 }
+
+/// Exposes the hosting `NSWindow` so the console can adjust window-level
+/// behaviour that SwiftUI does not surface.
+private struct WindowAccessor: NSViewRepresentable {
+    @Binding var window: NSWindow?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        // The view is not in a window yet during `makeNSView`.
+        DispatchQueue.main.async { window = view.window }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard window !== nsView.window else { return }
+        DispatchQueue.main.async { window = nsView.window }
+    }
+}
+

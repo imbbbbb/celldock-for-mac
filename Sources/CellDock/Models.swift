@@ -73,7 +73,7 @@ enum CellularDataConnectionState: Equatable {
     case failed
 }
 
-struct ModemUSBConfiguration: Equatable {
+struct ModemUSBConfiguration: Equatable, Codable {
     let vendorID: Int
     let productID: Int
     let diagnosticEnabled: Bool
@@ -108,14 +108,56 @@ struct ModemUSBConfiguration: Equatable {
         audioEnabled: true
     )
 
+    /// iPhone/iPad data-only. Identical to `maVoTarget` except for the audio
+    /// flag, so switching between the two rewrites a single field — the
+    /// smallest possible change, and therefore the one least likely to be
+    /// written wrong. Verified on hardware: the module still provides cellular
+    /// data over Type-C while no longer enumerating as a UAC sound card, so
+    /// iOS does not claim the system audio output.
+    static let mobileDataOnly = ModemUSBConfiguration(
+        vendorID: 0x2C7C,
+        productID: 0x0125,
+        diagnosticEnabled: true,
+        nmeaEnabled: true,
+        atPortEnabled: true,
+        modemEnabled: true,
+        networkEnabled: true,
+        adbEnabled: true,
+        audioEnabled: false
+    )
+
+    /// Factory DJI identity. DJOneHub only scans for 2CA3:4006, so restoring
+    /// this identity is what makes the module visible to it again. ADB and USB
+    /// audio are both off; CDC-ECM cellular data is retained.
+    static let djiStock = ModemUSBConfiguration(
+        vendorID: 0x2CA3,
+        productID: 0x4006,
+        diagnosticEnabled: true,
+        nmeaEnabled: true,
+        atPortEnabled: true,
+        modemEnabled: true,
+        networkEnabled: true,
+        adbEnabled: false,
+        audioEnabled: false
+    )
+
     var isSafeDJISource: Bool {
-        vendorID == 0x2CA3 && productID == 0x4006 &&
-            diagnosticEnabled && nmeaEnabled && atPortEnabled && modemEnabled && networkEnabled &&
-            !adbEnabled && !audioEnabled
+        self == Self.djiStock
     }
 
     var isCellDockTarget: Bool {
         self == Self.maVoTarget
+    }
+
+    /// The switchable mode this configuration represents, or nil for a known
+    /// transitional value or a configuration CellDock has never verified.
+    ///
+    /// Identification deliberately compares the whole configuration rather than
+    /// VID/PID: the same physical module reports a different VID/PID in each
+    /// mode, and two of the three modes share 2C7C:0125 while differing only in
+    /// the audio flag.
+    var mode: ModemMode? {
+        ModemMode.allCases.first { $0.configuration == self }
     }
 
     var isSafeIdentityConversionSource: Bool {
@@ -156,6 +198,120 @@ struct ModemUSBConfiguration: Equatable {
     }
 }
 
+/// The three USB configurations CellDock can put the module into.
+///
+/// This enum is the whitelist for mode switching. A target that is not one of
+/// these is refused before any write is attempted, and a configuration is never
+/// assembled at runtime out of individual flags — the whole tuple of VID, PID
+/// and the seven USBCFG fields moves together, so a mode can never be written
+/// with a mismatched identity.
+enum ModemMode: String, CaseIterable, Equatable, Codable {
+    /// Full communications terminal on the Mac: cellular data, SMS, calls and
+    /// recording. Enumerates USB audio, which is exactly what makes it
+    /// unsuitable for a phone or tablet.
+    case macFull
+    /// Quiet network device for iPhone/iPad: cellular data over Type-C with no
+    /// USB audio, so the host keeps its own speakers and microphone.
+    case mobileDataOnly
+    /// Factory DJI identity, for DJOneHub compatibility.
+    case djiStock
+
+    var configuration: ModemUSBConfiguration {
+        switch self {
+        case .macFull:
+            return .maVoTarget
+        case .mobileDataOnly:
+            return .mobileDataOnly
+        case .djiStock:
+            return .djiStock
+        }
+    }
+
+    /// Every mode requires CDC-ECM. A read-back reporting anything else is a
+    /// failed write, not a variant worth accepting.
+    var requiredUSBNetMode: Int { 1 }
+
+    /// Whether USB call audio exists in this mode. Callers must degrade only the
+    /// call UI when this is false, never the whole app: SMS, eSIM, contacts,
+    /// proxy and module status stay available in every mode.
+    var providesCallAudio: Bool {
+        configuration.audioEnabled
+    }
+
+    /// Whether the module is actually *running* this mode, as opposed to merely
+    /// having it stored.
+    ///
+    /// `AT+QCFG="USBCFG"` reports what sits in NV, and a write only takes
+    /// effect at the next restart — so a stored configuration matching the
+    /// target proves nothing by itself. The enumerated VID/PID is what settles
+    /// whether it is live.
+    ///
+    /// This distinction is load-bearing. Treating "stored" as "live" makes a
+    /// switch whose restart never landed unrecoverable: every retry would
+    /// short-circuit as already-done and report success, while the module stays
+    /// on the old identity forever.
+    func isLive(
+        storedConfiguration: ModemUSBConfiguration,
+        storedUSBNetMode: Int,
+        enumeratedVendorID: Int,
+        enumeratedProductID: Int
+    ) -> Bool {
+        storedConfiguration == configuration
+            && storedUSBNetMode == requiredUSBNetMode
+            && storedConfiguration.vendorID == enumeratedVendorID
+            && storedConfiguration.productID == enumeratedProductID
+    }
+
+    /// Scenario-facing name. The UI presents a situation to choose, never a raw
+    /// USBCFG tuple — the flags are dangerous to hand-edit and mean nothing to
+    /// the person deciding where to plug the module in.
+    var localizedTitle: String {
+        switch self {
+        case .macFull:
+            return L10n.tr("Mac 完整功能")
+        case .mobileDataOnly:
+            return L10n.tr("iPhone/iPad 纯上网")
+        case .djiStock:
+            return L10n.tr("DJI/DJOneHub 原始兼容")
+        }
+    }
+
+    var localizedSummary: String {
+        switch self {
+        case .macFull:
+            return L10n.tr("上网、短信、电话、录音")
+        case .mobileDataOnly:
+            return L10n.tr("关闭 USB 音频，保留蜂窝网络")
+        case .djiStock:
+            return L10n.tr("恢复 2CA3:4006，关闭 ADB 与 USB 音频")
+        }
+    }
+
+    /// What actually happens after the switch: which device to plug into next,
+    /// and what stops working until the user switches back.
+    var localizedConsequence: String {
+        switch self {
+        case .macFull:
+            return L10n.tr("模块会重启并以 2C7C:0125 枚举。Mac 上可用蜂窝网络、短信、通话与录音；DJOneHub 将无法发现模块。")
+        case .mobileDataOnly:
+            return L10n.tr("模块会重启并保持 2C7C:0125，但不再枚举 USB 音频。接到 iPhone/iPad 后可蜂窝上网且不占用系统音频；Mac 通话在切回完整模式前不可用。")
+        case .djiStock:
+            return L10n.tr("模块会重启并恢复为 2CA3:4006，同时关闭 ADB 与 USB 音频。DJOneHub 可重新发现模块；CellDock 通话在切回完整模式前不可用。")
+        }
+    }
+
+    var systemImageName: String {
+        switch self {
+        case .macFull:
+            return "laptopcomputer"
+        case .mobileDataOnly:
+            return "iphone"
+        case .djiStock:
+            return "shippingbox"
+        }
+    }
+}
+
 struct ModemSnapshot: Equatable {
     var state: ModemConnectionState = .disconnected
     var lifecyclePhase: ModemLifecyclePhase = .normal
@@ -176,6 +332,9 @@ struct ModemSnapshot: Equatable {
     var simICCID: String?
     var simIMSI: String?
     var moduleIMEI: String?
+    /// Firmware revision from `AT+QGMR`. Identifies the module across modes
+    /// alongside the IMEI, and selects the verified media backend.
+    var firmwareRevision: String?
     var usbNetMode: Int?
     var imsMode: Int?
     /// Quectel AT+QCFG="ims" VoLTE_cap. A value of 1 means a VoLTE
@@ -271,31 +430,36 @@ struct ModemSnapshot: Equatable {
 
         guard let usbIdentity else { return .inspecting }
         let normalizedIdentity = usbIdentity.uppercased()
-        if normalizedIdentity == "2CA3:4006" {
-            guard let usbConfiguration else {
-                return .unsupportedIdentity(normalizedIdentity)
-            }
-            if usbConfiguration.isSafeIdentityConversionSource {
-                return .needsIdentityConversion
-            }
-            return .unsupportedUSBConfiguration(usbConfiguration.compactDescription)
-        }
-        guard normalizedIdentity == "2C7C:0125" else {
+        guard normalizedIdentity == ModemUSBConfiguration.maVoTarget.identity
+                || normalizedIdentity == ModemUSBConfiguration.djiStock.identity else {
             return .unsupportedIdentity(normalizedIdentity)
         }
         guard let usbConfiguration else { return .inspecting }
-        guard usbConfiguration.isCellDockTarget else {
-            return .unsupportedUSBConfiguration(usbConfiguration.compactDescription)
+
+        // Every verified mode is a legitimate operating state, including the
+        // DJI stock identity and the audio-less iPhone/iPad mode. Treating
+        // those as configuration errors is what previously stranded the
+        // module: the main UI refused to open, and the recovery entry point
+        // disappeared along with it.
+        if usbConfiguration.mode != nil {
+            guard let usbNetMode else { return .inspecting }
+            switch usbNetMode {
+            case 0:
+                return .needsECM
+            case 1:
+                return .ready
+            default:
+                return .unsupportedUSBNetMode(usbNetMode)
+            }
         }
-        guard let usbNetMode else { return .inspecting }
-        switch usbNetMode {
-        case 0:
-            return .needsECM
-        case 1:
-            return .ready
-        default:
-            return .unsupportedUSBNetMode(usbNetMode)
+
+        // Not a mode, but a transitional value CellDock has verified before, so
+        // switching to a real mode can repair it.
+        if usbConfiguration.isSafeIdentityConversionSource {
+            return .needsIdentityConversion
         }
+
+        return .unsupportedUSBConfiguration(usbConfiguration.compactDescription)
     }
 }
 

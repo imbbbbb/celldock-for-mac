@@ -12,6 +12,7 @@ struct MessagesWindowView: View {
     @State private var searchText = ""
     @State private var isComposingNew = false
     @State private var newDestination = ""
+    @State private var conversationPendingDeletion: MessageConversation?
     @FocusState private var listFocused: Bool
 
     var body: some View {
@@ -72,6 +73,30 @@ struct MessagesWindowView: View {
             isComposingNew = false
             markSelectedConversationRead()
         }
+        .alert(
+            L10n.tr("删除这段对话？"),
+            isPresented: Binding(
+                get: { conversationPendingDeletion != nil },
+                set: { if !$0 { conversationPendingDeletion = nil } }
+            ),
+            presenting: conversationPendingDeletion
+        ) { conversation in
+            Button(L10n.tr("取消"), role: .cancel) {
+                conversationPendingDeletion = nil
+            }
+            Button(L10n.tr("删除"), role: .destructive) {
+                if selectedConversationID == conversation.id {
+                    selectedConversationID = nil
+                }
+                appState.deleteConversation(conversation)
+                conversationPendingDeletion = nil
+            }
+        } message: { conversation in
+            Text(L10n.tr(
+                "将删除 %lld 条短信。模块或 SIM 卡上的副本会一并清除，无法撤销。",
+                Int64(conversation.messages.count)
+            ))
+        }
     }
 
     private var conversationSidebar: some View {
@@ -117,6 +142,14 @@ struct MessagesWindowView: View {
                             }
                             Button(L10n.tr("全部标为已读"), systemImage: "envelope.open") {
                                 markConversationRead(conversation)
+                            }
+                            Divider()
+                            Button(
+                                L10n.tr("删除对话"),
+                                systemImage: "trash",
+                                role: .destructive
+                            ) {
+                                conversationPendingDeletion = conversation
                             }
                         }
                     }

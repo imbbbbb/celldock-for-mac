@@ -122,6 +122,17 @@ struct PhoneWindowView: View {
                 }
             )
                 .environmentObject(appState)
+        case .moduleMode:
+            ScrollView {
+                ModuleModeRecoveryView()
+                    .environmentObject(appState)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(22)
+            }
+            .scrollContentBackground(.hidden)
+            .background(Color.clear)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .communicationDetailColumnStyle()
         case .settings:
             CellDockSettingsView(
                 sidebarWidth: sidebarWidthBinding,
@@ -461,6 +472,7 @@ private struct CommunicationRailView: View {
                     .accessibilityLabel(L10n.tr("演示隐私保护已开启"))
             }
             railButton(.sim, icon: .sim)
+            railButton(.moduleMode, icon: .moduleMode)
             railButton(.settings, icon: .settings)
         }
         .padding(.horizontal, 10)
@@ -493,7 +505,7 @@ private struct CommunicationRailView: View {
         switch section {
         case .messages, .recents, .recordings, .proxy:
             return "primary"
-        case .sim, .settings:
+        case .sim, .moduleMode, .settings:
             return "secondary"
         case .dialer, .contacts:
             return "primary"

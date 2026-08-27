@@ -65,26 +65,26 @@ static int response_has_exact_line(const char *output, const char *wanted) {
     return 0;
 }
 
-static int run_command(MaVoModem *modem, const char *command, int timeout_ms, char *output, size_t capacity) {
-    int result = mavo_modem_command(modem, command, timeout_ms, output, capacity);
+static int run_command(CellDockModem *modem, const char *command, int timeout_ms, char *output, size_t capacity) {
+    int result = celldock_modem_command(modem, command, timeout_ms, output, capacity);
     printf("\n> %s\n%s\n", command, output[0] == '\0' ? "[no response]" : output);
-    if (result != MAVO_MODEM_OK) {
-        fprintf(stderr, "%s\n", mavo_modem_last_error(modem));
+    if (result != CELLDOCK_MODEM_OK) {
+        fprintf(stderr, "%s\n", celldock_modem_last_error(modem));
     }
     return result;
 }
 
 static int run_call_result_command(
-    MaVoModem *modem,
+    CellDockModem *modem,
     const char *command,
     int timeout_ms,
     char *output,
     size_t capacity
 ) {
-    int result = mavo_modem_call_command(modem, command, timeout_ms, output, capacity);
+    int result = celldock_modem_call_command(modem, command, timeout_ms, output, capacity);
     printf("\n> %s\n%s\n", command, output[0] == '\0' ? "[no response]" : output);
-    if (result != MAVO_MODEM_OK) {
-        fprintf(stderr, "%s\n", mavo_modem_last_error(modem));
+    if (result != CELLDOCK_MODEM_OK) {
+        fprintf(stderr, "%s\n", celldock_modem_last_error(modem));
     }
     return result;
 }
@@ -133,30 +133,30 @@ static int response_has_uac_config(const char *output, int enabled) {
     return response_has_usb_config(output, 0, enabled);
 }
 
-static ModemIdentity capture_modem_identity(const MaVoModem *modem) {
+static ModemIdentity capture_modem_identity(const CellDockModem *modem) {
     ModemIdentity identity = {
-        .vendor_id = mavo_modem_vendor_id(modem),
-        .product_id = mavo_modem_product_id(modem),
-        .location_id = mavo_modem_location_id(modem),
-        .registry_id = mavo_modem_registry_id(modem)
+        .vendor_id = celldock_modem_vendor_id(modem),
+        .product_id = celldock_modem_product_id(modem),
+        .location_id = celldock_modem_location_id(modem),
+        .registry_id = celldock_modem_registry_id(modem)
     };
     return identity;
 }
 
-static int modem_identity_matches(const MaVoModem *modem, const ModemIdentity *identity) {
-    if (mavo_modem_vendor_id(modem) != identity->vendor_id ||
-        mavo_modem_product_id(modem) != identity->product_id ||
-        mavo_modem_location_id(modem) != identity->location_id) {
+static int modem_identity_matches(const CellDockModem *modem, const ModemIdentity *identity) {
+    if (celldock_modem_vendor_id(modem) != identity->vendor_id ||
+        celldock_modem_product_id(modem) != identity->product_id ||
+        celldock_modem_location_id(modem) != identity->location_id) {
         return 0;
     }
-    uint64_t registry_id = mavo_modem_registry_id(modem);
+    uint64_t registry_id = celldock_modem_registry_id(modem);
     return identity->registry_id == 0 || registry_id == 0 || registry_id == identity->registry_id;
 }
 
-static void drain_reconnect_events(MaVoModem *modem) {
+static void drain_reconnect_events(CellDockModem *modem) {
     char pending[4096] = {0};
     for (int attempt = 0; attempt < 64; attempt++) {
-        int count = mavo_modem_read(modem, 25, pending, sizeof(pending));
+        int count = celldock_modem_read(modem, 25, pending, sizeof(pending));
         if (count > 0) {
             printf("\n[reconnect pending]\n%s\n", pending);
             continue;
@@ -166,25 +166,25 @@ static void drain_reconnect_events(MaVoModem *modem) {
     fprintf(stderr, "Reconnect drain reached its safety limit.\n");
 }
 
-static int ensure_original_modem_open(MaVoModem *modem, const ModemIdentity *identity) {
-    if (mavo_modem_is_open(modem)) {
+static int ensure_original_modem_open(CellDockModem *modem, const ModemIdentity *identity) {
+    if (celldock_modem_is_open(modem)) {
         if (modem_identity_matches(modem, identity)) {
             return 1;
         }
         fprintf(stderr, "Open AT interface no longer matches the captured USB identity.\n");
-        mavo_modem_close(modem);
+        celldock_modem_close(modem);
         return 0;
     }
     if (identity->location_id == 0 ||
-        mavo_modem_open_for_location(modem, identity->location_id) != MAVO_MODEM_OK) {
+        celldock_modem_open_for_location(modem, identity->location_id) != CELLDOCK_MODEM_OK) {
         fprintf(stderr, "Could not reopen original modem location 0x%08X: %s\n",
             identity->location_id,
-            mavo_modem_last_error(modem));
+            celldock_modem_last_error(modem));
         return 0;
     }
     if (!modem_identity_matches(modem, identity)) {
         fprintf(stderr, "Reopened USB interface does not match the captured modem identity.\n");
-        mavo_modem_close(modem);
+        celldock_modem_close(modem);
         return 0;
     }
     drain_reconnect_events(modem);
@@ -251,12 +251,12 @@ static void print_cgact_snapshot(const char *label, const CGACTSnapshot *snapsho
 }
 
 static int query_cgact_snapshot_once(
-    MaVoModem *modem,
+    CellDockModem *modem,
     CGACTSnapshot *snapshot,
     char *response,
     size_t response_capacity
 ) {
-    if (run_command(modem, "AT+CGACT?", 5000, response, response_capacity) != MAVO_MODEM_OK ||
+    if (run_command(modem, "AT+CGACT?", 5000, response, response_capacity) != CELLDOCK_MODEM_OK ||
         !response_succeeded(response) ||
         !parse_cgact_snapshot(response, snapshot)) {
         return 0;
@@ -265,7 +265,7 @@ static int query_cgact_snapshot_once(
 }
 
 static int query_cgact_snapshot_recovering(
-    MaVoModem *modem,
+    CellDockModem *modem,
     const ModemIdentity *identity,
     CGACTSnapshot *snapshot,
     char *response,
@@ -278,7 +278,7 @@ static int query_cgact_snapshot_recovering(
         if (query_cgact_snapshot_once(modem, snapshot, response, response_capacity)) {
             return 1;
         }
-        if (mavo_modem_is_open(modem)) {
+        if (celldock_modem_is_open(modem)) {
             break;
         }
     }
@@ -286,7 +286,7 @@ static int query_cgact_snapshot_recovering(
 }
 
 static int wait_for_stable_cgact_snapshot(
-    MaVoModem *modem,
+    CellDockModem *modem,
     const ModemIdentity *identity,
     const CGACTSnapshot *wanted,
     int attempts,
@@ -326,14 +326,14 @@ static int wait_for_stable_cgact_snapshot(
 }
 
 static int run_cgact_write(
-    MaVoModem *modem,
+    CellDockModem *modem,
     const ModemIdentity *identity,
     const char *command,
     char *response,
     size_t response_capacity
 ) {
     if (!ensure_original_modem_open(modem, identity)) {
-        return MAVO_MODEM_NOT_OPEN;
+        return CELLDOCK_MODEM_NOT_OPEN;
     }
     return run_call_result_command(
         modem,
@@ -345,13 +345,13 @@ static int run_cgact_write(
 }
 
 static int query_clcc_fail_closed(
-    MaVoModem *modem,
+    CellDockModem *modem,
     int *voice_calls,
     int *data_calls,
     char *response,
     size_t response_capacity
 ) {
-    if (run_command(modem, "AT+CLCC", 3000, response, response_capacity) != MAVO_MODEM_OK ||
+    if (run_command(modem, "AT+CLCC", 3000, response, response_capacity) != CELLDOCK_MODEM_OK ||
         !response_succeeded(response)) {
         return 0;
     }
@@ -389,13 +389,13 @@ static int parse_ims_state(const char *output, int *configuration, int *volte_ca
 }
 
 static int query_ims_state(
-    MaVoModem *modem,
+    CellDockModem *modem,
     int *configuration,
     int *volte_capability,
     char *response,
     size_t response_capacity
 ) {
-    return run_command(modem, "AT+QCFG=\"ims\"", 3000, response, response_capacity) == MAVO_MODEM_OK &&
+    return run_command(modem, "AT+QCFG=\"ims\"", 3000, response, response_capacity) == CELLDOCK_MODEM_OK &&
         response_succeeded(response) &&
         parse_ims_state(response, configuration, volte_capability);
 }
@@ -452,7 +452,7 @@ static int response_has_ready_network_device(const char *output) {
 }
 
 static int verify_restored_service_state(
-    MaVoModem *modem,
+    CellDockModem *modem,
     const ModemIdentity *identity,
     int baseline_ims_configuration,
     int baseline_volte_capability,
@@ -462,7 +462,7 @@ static int verify_restored_service_state(
     if (!ensure_original_modem_open(modem, identity)) {
         return 0;
     }
-    if (run_command(modem, "AT+CGATT?", 3000, response, response_capacity) != MAVO_MODEM_OK ||
+    if (run_command(modem, "AT+CGATT?", 3000, response, response_capacity) != CELLDOCK_MODEM_OK ||
         !response_succeeded(response) || strstr(response, "+CGATT: 1") == NULL) {
         return 0;
     }
@@ -478,15 +478,15 @@ static int verify_restored_service_state(
         volte_capability != baseline_volte_capability) {
         return 0;
     }
-    if (run_command(modem, "AT+CEREG?", 3000, response, response_capacity) != MAVO_MODEM_OK ||
+    if (run_command(modem, "AT+CEREG?", 3000, response, response_capacity) != CELLDOCK_MODEM_OK ||
         !response_succeeded(response) || !response_reports_registered(response)) {
         return 0;
     }
-    if (run_command(modem, "AT+CGPADDR=1", 5000, response, response_capacity) != MAVO_MODEM_OK ||
+    if (run_command(modem, "AT+CGPADDR=1", 5000, response, response_capacity) != CELLDOCK_MODEM_OK ||
         !response_succeeded(response) || !response_has_nonzero_cid1_address(response)) {
         return 0;
     }
-    if (run_command(modem, "AT+QNETDEVSTATUS?", 5000, response, response_capacity) != MAVO_MODEM_OK ||
+    if (run_command(modem, "AT+QNETDEVSTATUS?", 5000, response, response_capacity) != CELLDOCK_MODEM_OK ||
         !response_succeeded(response) || !response_has_ready_network_device(response)) {
         return 0;
     }
@@ -529,23 +529,23 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    MaVoModem *modem = mavo_modem_create();
-    if (modem == NULL || mavo_modem_open(modem) != MAVO_MODEM_OK) {
-        fprintf(stderr, "open failed: %s\n", mavo_modem_last_error(modem));
-        mavo_modem_destroy(modem);
+    CellDockModem *modem = celldock_modem_create();
+    if (modem == NULL || celldock_modem_open(modem) != CELLDOCK_MODEM_OK) {
+        fprintf(stderr, "open failed: %s\n", celldock_modem_last_error(modem));
+        celldock_modem_destroy(modem);
         return 1;
     }
     printf(
         "USB %04X:%04X; AT interface 2; OUT=0x%02X IN=0x%02X\n",
-        mavo_modem_vendor_id(modem),
-        mavo_modem_product_id(modem),
-        mavo_modem_output_endpoint(modem),
-        mavo_modem_input_endpoint(modem)
+        celldock_modem_vendor_id(modem),
+        celldock_modem_product_id(modem),
+        celldock_modem_output_endpoint(modem),
+        celldock_modem_input_endpoint(modem)
     );
 
     char response[65536] = {0};
-    if (run_command(modem, "AT", 2000, response, sizeof(response)) != MAVO_MODEM_OK) {
-        mavo_modem_destroy(modem);
+    if (run_command(modem, "AT", 2000, response, sizeof(response)) != CELLDOCK_MODEM_OK) {
+        celldock_modem_destroy(modem);
         return 1;
     }
     (void)run_command(modem, "ATE0", 2000, response, sizeof(response));
@@ -572,13 +572,13 @@ int main(int argc, char **argv) {
                     sizeof(response)
                 ) && voice_calls == 0) {
                 printf("\nCALL CLEANUP CONFIRMED: voice CLCC is empty.\n");
-                mavo_modem_destroy(modem);
+                celldock_modem_destroy(modem);
                 return 0;
             }
             usleep(200000);
         }
         fprintf(stderr, "Call cleanup was not confirmed by an empty voice CLCC.\n");
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return 5;
     }
 
@@ -587,91 +587,91 @@ int main(int argc, char **argv) {
         int succeeded = 0;
         for (size_t index = 0; index < sizeof(queries) / sizeof(queries[0]); index++) {
             int result = run_command(modem, queries[index], 3000, response, sizeof(response));
-            if (index == 0 && result == MAVO_MODEM_OK && response_succeeded(response)) {
+            if (index == 0 && result == CELLDOCK_MODEM_OK && response_succeeded(response)) {
                 succeeded = 1;
             }
         }
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return succeeded ? 0 : 6;
     }
 
     if (strcmp(action, "query-call-end") == 0) {
         int result = run_command(modem, "AT+CEER", 3000, response, sizeof(response));
         (void)run_command(modem, "AT+CLCC", 3000, response, sizeof(response));
-        mavo_modem_destroy(modem);
-        return result == MAVO_MODEM_OK ? 0 : 7;
+        celldock_modem_destroy(modem);
+        return result == CELLDOCK_MODEM_OK ? 0 : 7;
     }
 
     if (strcmp(action, "query-adb-key") == 0) {
         int result = run_command(modem, "AT+QADBKEY?", 3000, response, sizeof(response));
-        int ok = result == MAVO_MODEM_OK && response_succeeded(response) &&
+        int ok = result == CELLDOCK_MODEM_OK && response_succeeded(response) &&
             strstr(response, "+QADBKEY:") != NULL;
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return ok ? 0 : 3;
     }
 
     if (strcmp(action, "restore-dji-config") == 0) {
-        if (run_command(modem, "AT+CLCC", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+CLCC", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) || response_has_voice_call(response)) {
             fprintf(stderr, "DJI restore refused: empty voice-call state is not confirmed.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response)) {
             fprintf(stderr, "DJI restore refused: current tuple cannot be read.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
         if (response_has_dji_usb_config(response)) {
             printf("\nUSBCFG already matches the exact DJI source tuple.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 0;
         }
         if (!response_has_usb_config(response, 1, 1)) {
-            fprintf(stderr, "DJI restore refused: current tuple is not the exact MaVo target.\n");
-            mavo_modem_destroy(modem);
+            fprintf(stderr, "DJI restore refused: current tuple is not the exact CellDock target.\n");
+            celldock_modem_destroy(modem);
             return 3;
         }
 
         const char *write_command =
             "AT+QCFG=\"USBCFG\",0x2CA3,0x4006,1,1,1,1,1,0,0";
         int write_result = run_command(modem, write_command, 5000, response, sizeof(response));
-        if (write_result != MAVO_MODEM_OK) {
+        if (write_result != CELLDOCK_MODEM_OK) {
             fprintf(stderr, "DJI restore response is ambiguous; do not repeat. Re-enumerate and read back.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 10;
         }
         if (!response_succeeded(response)) {
             fprintf(stderr, "DJI restore was explicitly rejected.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 4;
         }
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK) {
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK) {
             fprintf(stderr, "DJI restore was accepted and USB detached before read-back.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 10;
         }
         if (!response_succeeded(response) || !response_has_dji_usb_config(response)) {
             fprintf(stderr, "DJI restore post-write read-back did not match the exact source tuple.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 5;
         }
         printf("\nDJI USBCFG exact write and read-back verified; controlled restart is required.\n");
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return 0;
     }
 
     if (strcmp(action, "restart-dji") == 0) {
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) || !response_has_dji_usb_config(response)) {
             fprintf(stderr, "DJI restart refused: USBCFG does not match the exact source tuple.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
         printf("\nDJI USBCFG exact tuple verified. Requesting one controlled module restart...\n");
         (void)run_command(modem, "AT+CFUN=1,1", 1000, response, sizeof(response));
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return 0;
     }
 
@@ -679,29 +679,29 @@ int main(int argc, char **argv) {
         if (argc != 3 || strlen(argv[2]) != 15 ||
             strspn(argv[2], "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") != 15) {
             fprintf(stderr, "unlock-adb-key requires one 15-character MD5-crypt key.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
-        if (run_command(modem, "AT+QADBKEY?", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QADBKEY?", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) || strstr(response, "+QADBKEY:") == NULL) {
             fprintf(stderr, "ADB unlock refused: QADBKEY challenge is unavailable.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
         char command[64] = {0};
         int command_length = snprintf(command, sizeof(command), "AT+QADBKEY=\"%s\"", argv[2]);
         if (command_length <= 0 || (size_t)command_length >= sizeof(command)) {
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
-        int result = mavo_modem_command(modem, command, 3000, response, sizeof(response));
+        int result = celldock_modem_command(modem, command, 3000, response, sizeof(response));
         printf("\n> AT+QADBKEY=\"[redacted]\"\n%s\n", response[0] == '\0' ? "[no response]" : response);
         memset(command, 0, sizeof(command));
-        int ok = result == MAVO_MODEM_OK && response_succeeded(response);
+        int ok = result == CELLDOCK_MODEM_OK && response_succeeded(response);
         if (!ok) {
-            fprintf(stderr, "ADB unlock key was not accepted: %s\n", mavo_modem_last_error(modem));
+            fprintf(stderr, "ADB unlock key was not accepted: %s\n", celldock_modem_last_error(modem));
         }
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return ok ? 0 : 4;
     }
 
@@ -733,7 +733,7 @@ int main(int argc, char **argv) {
         for (size_t index = 0; index < sizeof(queries) / sizeof(queries[0]); index++) {
             (void)run_command(modem, queries[index], 4000, response, sizeof(response));
         }
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return 0;
     }
 
@@ -743,14 +743,14 @@ int main(int argc, char **argv) {
         int enabled = 0;
 
         (void)run_command(modem, "AT+CMEE=2", 2000, response, sizeof(response));
-        if (run_command(modem, "AT+QGPS?", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QGPS?", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             strstr(response, "+QGPS: 0") == NULL) {
             fprintf(stderr, "QPCMV probe refused: GNSS state is not confirmed idle.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
-        if (run_command(modem, "AT+QGPSCFG=\"outport\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK) {
-            mavo_modem_destroy(modem);
+        if (run_command(modem, "AT+QGPSCFG=\"outport\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK) {
+            celldock_modem_destroy(modem);
             return 2;
         }
         if (strstr(response, "usbnmea") != NULL) {
@@ -761,12 +761,12 @@ int main(int argc, char **argv) {
                     3000,
                     response,
                     sizeof(response)
-                ) != MAVO_MODEM_OK || !response_succeeded(response)) {
+                ) != CELLDOCK_MODEM_OK || !response_succeeded(response)) {
                 fprintf(stderr, "Could not temporarily release USB NMEA from GNSS.\n");
-                mavo_modem_destroy(modem);
+                celldock_modem_destroy(modem);
                 return 2;
             }
-            if (run_command(modem, "AT+QGPSCFG=\"outport\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+            if (run_command(modem, "AT+QGPSCFG=\"outport\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
                 strstr(response, "none") == NULL) {
                 fprintf(stderr, "Temporary GPS outport read-back failed.\n");
                 exit_code = 2;
@@ -774,7 +774,7 @@ int main(int argc, char **argv) {
             }
         } else if (strstr(response, "none") == NULL) {
             fprintf(stderr, "QPCMV probe refused: unsupported GPS outport value.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
 
@@ -807,13 +807,13 @@ cleanup_qpcmv_probe:
                 sizeof(response)
             );
             if (!response_succeeded(response) ||
-                run_command(modem, "AT+QGPSCFG=\"outport\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+                run_command(modem, "AT+QGPSCFG=\"outport\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
                 strstr(response, "usbnmea") == NULL) {
                 fprintf(stderr, "GPS outport restore was not confirmed.\n");
                 exit_code = 5;
             }
         }
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return exit_code;
     }
 
@@ -839,36 +839,36 @@ cleanup_qpcmv_probe:
 
         if (identity.location_id == 0 || identity.vendor_id == 0 || identity.product_id == 0) {
             fprintf(stderr, "CID1 experiment refused: stable USB identity is unavailable.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
         if (!install_cleanup_signal_handlers()) {
             fprintf(stderr, "CID1 experiment refused: could not install SIGINT/SIGTERM cleanup handlers.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
         (void)run_command(modem, "AT+CMEE=2", 2000, response, sizeof(response));
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) || !response_has_uac_config(response, 1)) {
             fprintf(stderr, "CID1 experiment refused: exact UAC-enabled USBCFG is not confirmed.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
-        if (run_command(modem, "AT+QPCMV=?", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QPCMV=?", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) || strstr(response, "(0-2)") == NULL) {
             fprintf(stderr, "CID1 experiment refused: QPCMV option 2 is not advertised.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
-        if (run_command(modem, "AT+CGATT?", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+CGATT?", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) || strstr(response, "+CGATT: 1") == NULL) {
             fprintf(stderr, "CID1 experiment refused: packet attachment is not confirmed active.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
         if (!query_cgact_snapshot_once(modem, &baseline_cgact, response, sizeof(response))) {
             fprintf(stderr, "CID1 experiment refused: complete CGACT baseline is unavailable.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
         if (baseline_cgact.state[1] != 1 || baseline_cgact.state[5] != 1) {
@@ -878,7 +878,7 @@ cleanup_qpcmv_probe:
                 baseline_cgact.state[1],
                 baseline_cgact.state[5]
             );
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
         if (!query_ims_state(
@@ -889,7 +889,7 @@ cleanup_qpcmv_probe:
                 sizeof(response)
             ) || baseline_volte_capability != 1) {
             fprintf(stderr, "CID1 experiment refused: baseline IMS/VoLTE availability is not confirmed.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
         if (!query_clcc_fail_closed(
@@ -900,7 +900,7 @@ cleanup_qpcmv_probe:
                 sizeof(response)
             ) || baseline_voice_calls != 0) {
             fprintf(stderr, "CID1 experiment refused: empty voice-call state is not confirmed.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
         if (!verify_restored_service_state(
@@ -912,12 +912,12 @@ cleanup_qpcmv_probe:
                 sizeof(response)
             )) {
             fprintf(stderr, "CID1 experiment refused: baseline packet/IMS/network service is incomplete.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 2;
         }
         if (cleanup_signal != 0) {
             fprintf(stderr, "CID1 experiment interrupted before any state-changing command.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 128 + cleanup_signal;
         }
 
@@ -939,7 +939,7 @@ cleanup_qpcmv_probe:
             response,
             sizeof(response)
         );
-        if (deactivate_result != MAVO_MODEM_OK) {
+        if (deactivate_result != CELLDOCK_MODEM_OK) {
             fprintf(stderr, "CID1 deactivation response is ambiguous; reconciling by exact read-back.\n");
         } else if (!response_succeeded(response)) {
             fprintf(stderr, "CID1 deactivation returned a non-OK terminal result; reconciling by exact read-back.\n");
@@ -1006,9 +1006,9 @@ cleanup_qpcmv_probe:
             response,
             sizeof(response)
         );
-        if (enable_result == MAVO_MODEM_OK && response_succeeded(response)) {
+        if (enable_result == CELLDOCK_MODEM_OK && response_succeeded(response)) {
             qpcmv_enable_succeeded = 1;
-        } else if (enable_result != MAVO_MODEM_OK) {
+        } else if (enable_result != CELLDOCK_MODEM_OK) {
             qpcmv_enable_ambiguous = 1;
         } else {
             /* An explicit terminal ERROR guarantees the enable write was rejected. */
@@ -1046,11 +1046,11 @@ restore_cid1:
                     response,
                     sizeof(response)
                 );
-                if (reset_result == MAVO_MODEM_OK && response_succeeded(response)) {
+                if (reset_result == CELLDOCK_MODEM_OK && response_succeeded(response)) {
                     qpcmv_cleanup_confirmed = 1;
                     break;
                 }
-                if (reset_result == MAVO_MODEM_OK) {
+                if (reset_result == CELLDOCK_MODEM_OK) {
                     /* Explicit rejection is deterministic; do not hammer the modem. */
                     break;
                 }
@@ -1079,7 +1079,7 @@ restore_cid1:
                     response,
                     sizeof(response)
                 );
-                if (restore_result != MAVO_MODEM_OK) {
+                if (restore_result != CELLDOCK_MODEM_OK) {
                     fprintf(stderr, "CID1 restore response is ambiguous; reconciling by exact read-back.\n");
                 }
                 restore_confirmed = wait_for_stable_cgact_snapshot(
@@ -1122,30 +1122,30 @@ restore_cid1:
                 service_restore_confirmed ? "ok" : "bad",
                 restore_write_sent
             );
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 7;
         }
         print_cgact_snapshot("CID1 EXPERIMENT restored baseline:", &baseline_cgact);
         printf("\nCID1 EXPERIMENT restoration confirmed: full CGACT, attachment, address, "
             "IMS, registration, network device, and empty voice-call state.\n");
         if (!qpcmv_cleanup_confirmed) {
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 8;
         }
         if (cleanup_signal != 0) {
             int signal_number = cleanup_signal;
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 128 + signal_number;
         }
         if (!idle_gate_confirmed) {
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 5;
         }
         if (qpcmv_enable_ambiguous) {
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 9;
         }
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return qpcmv_enable_succeeded ? 0 : 6;
     }
 
@@ -1155,21 +1155,21 @@ restore_cid1:
             ? "AT+QCFG=\"USBCFG\",0x2C7C,0x0125,1,1,1,1,1,1,1"
             : "AT+QCFG=\"USBCFG\",0x2C7C,0x0125,1,1,1,1,1,0,1";
 
-        if (run_command(modem, "AT+CLCC", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+CLCC", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) || response_has_voice_call(response)) {
             fprintf(stderr, "ADB USBCFG write refused: empty voice-call state is not confirmed.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response)) {
             fprintf(stderr, "ADB USBCFG write refused: current tuple cannot be read.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
         if (response_has_usb_config(response, enable_adb, 1)) {
             printf("\nUSBCFG already has the requested exact ADB/UAC value.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 0;
         }
         if (!response_has_usb_config(response, !enable_adb, 1)) {
@@ -1177,37 +1177,37 @@ restore_cid1:
                 stderr,
                 "ADB USBCFG write refused: expected the exact UAC-enabled tuple with only ADB inverted.\n"
             );
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
 
         int write_result = run_command(modem, write_command, 5000, response, sizeof(response));
-        if (write_result != MAVO_MODEM_OK) {
+        if (write_result != CELLDOCK_MODEM_OK) {
             fprintf(
                 stderr,
                 "ADB USBCFG response is ambiguous; do not repeat. Re-enumerate and read back.\n"
             );
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 10;
         }
         if (!response_succeeded(response)) {
             fprintf(stderr, "ADB USBCFG write was explicitly rejected.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 4;
         }
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK) {
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK) {
             fprintf(stderr, "ADB USBCFG was accepted and USB detached before read-back.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 10;
         }
         if (!response_succeeded(response) ||
             !response_has_usb_config(response, enable_adb, 1)) {
             fprintf(stderr, "ADB USBCFG post-write read-back did not match the exact target.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 5;
         }
         printf("\nADB/UAC USBCFG exact write and read-back verified; controlled restart is required.\n");
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return 0;
     }
 
@@ -1217,59 +1217,59 @@ restore_cid1:
             ? "AT+QCFG=\"USBCFG\",0x2C7C,0x0125,1,1,1,1,1,0,1"
             : "AT+QCFG=\"USBCFG\",0x2C7C,0x0125,1,1,1,1,1,0,0";
 
-        if (run_command(modem, "AT+CLCC", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+CLCC", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) || response_has_voice_call(response)) {
             fprintf(stderr, "USBCFG write refused: voice-call state is not confirmed empty.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
         if (enable) {
-            if (run_command(modem, "AT+QPCMV=?", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+            if (run_command(modem, "AT+QPCMV=?", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
                 !response_succeeded(response) || strstr(response, "0-2") == NULL) {
                 fprintf(stderr, "UAC enable refused: QPCMV option 2 was not advertised.\n");
-                mavo_modem_destroy(modem);
+                celldock_modem_destroy(modem);
                 return 3;
             }
         }
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response)) {
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
         if (response_has_uac_config(response, enable)) {
             printf("\nUSBCFG already has the requested exact value.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 0;
         }
         if (!response_has_uac_config(response, !enable)) {
             fprintf(stderr, "USBCFG write refused: current tuple is neither the recorded original nor the exact UAC target.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
 
         int write_result = run_command(modem, write_command, 5000, response, sizeof(response));
-        if (write_result != MAVO_MODEM_OK) {
+        if (write_result != CELLDOCK_MODEM_OK) {
             fprintf(stderr, "USBCFG write response is ambiguous; do not repeat it. Re-enumerate and read back actual state.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 10;
         }
         if (!response_succeeded(response)) {
             fprintf(stderr, "USBCFG write was explicitly rejected.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 4;
         }
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK) {
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK) {
             fprintf(stderr, "USBCFG write was accepted and the device detached before read-back.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 10;
         }
         if (!response_has_uac_config(response, enable)) {
             fprintf(stderr, "USBCFG post-write read-back did not match the requested exact tuple.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 5;
         }
         printf("\nUSBCFG exact write and read-back verified; restart may still be required.\n");
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return 0;
     }
 
@@ -1278,38 +1278,38 @@ restore_cid1:
         strcmp(action, "restart-original") == 0) {
         const int expect_uac = strcmp(action, "restart-original") != 0;
         const int expect_adb = strcmp(action, "restart-uac-adb") == 0;
-        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QCFG=\"USBCFG\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             !response_succeeded(response) ||
             !response_has_usb_config(response, expect_adb, expect_uac)) {
             fprintf(stderr, "Module restart refused: USBCFG does not match the expected exact tuple.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 3;
         }
         printf("\nUSBCFG exact tuple verified. Requesting one controlled module restart...\n");
         (void)run_command(modem, "AT+CFUN=1,1", 1000, response, sizeof(response));
-        mavo_modem_destroy(modem);
+        celldock_modem_destroy(modem);
         return 0;
     }
 
-    if (run_command(modem, "AT+QCFG=\"usbnet\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK) {
-        mavo_modem_destroy(modem);
+    if (run_command(modem, "AT+QCFG=\"usbnet\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK) {
+        celldock_modem_destroy(modem);
         return 1;
     }
     if (strstr(response, "\"usbnet\",1") == NULL) {
-        if (run_command(modem, "AT+QCFG=\"usbnet\",1", 5000, response, sizeof(response)) != MAVO_MODEM_OK) {
-            mavo_modem_destroy(modem);
+        if (run_command(modem, "AT+QCFG=\"usbnet\",1", 5000, response, sizeof(response)) != CELLDOCK_MODEM_OK) {
+            celldock_modem_destroy(modem);
             return 1;
         }
-        if (run_command(modem, "AT+QCFG=\"usbnet\"", 3000, response, sizeof(response)) != MAVO_MODEM_OK ||
+        if (run_command(modem, "AT+QCFG=\"usbnet\"", 3000, response, sizeof(response)) != CELLDOCK_MODEM_OK ||
             strstr(response, "\"usbnet\",1") == NULL) {
             fprintf(stderr, "ECM read-back verification failed; module was not restarted.\n");
-            mavo_modem_destroy(modem);
+            celldock_modem_destroy(modem);
             return 1;
         }
     }
 
     printf("\nECM mode verified. Restarting the module...\n");
     (void)run_command(modem, "AT+CFUN=1,1", 1000, response, sizeof(response));
-    mavo_modem_destroy(modem);
+    celldock_modem_destroy(modem);
     return 0;
 }

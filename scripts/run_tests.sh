@@ -44,6 +44,12 @@ swiftc \
   "$ROOT/Sources/CellDockNetworkIPC/CellDockNetworkIPC.swift" \
   "$ROOT/Sources/CellDockNetworkHelper/NetworkHelperState.swift" \
   "$ROOT/Sources/CellDock/Models.swift" \
+  "$ROOT/Sources/CellDock/VerifiedModeWrite.swift" \
+  "$ROOT/Sources/CellDock/ModeWriteDecision.swift" \
+  "$ROOT/Sources/CellDock/ModemFirmwareCapability.swift" \
+  "$ROOT/Sources/CellDock/ModeConfigurationSnapshot.swift" \
+  "$ROOT/Sources/CellDock/ModeSwitchLog.swift" \
+  "$ROOT/Sources/CellDock/ModuleDiagnosticReport.swift" \
   "$ROOT/Sources/CellDock/QADBKeyDeriver.swift" \
   "$ROOT/Sources/CellDock/MessageConversation.swift" \
   "$ROOT/Sources/CellDock/CellularLinkRecovery.swift" \
@@ -163,3 +169,11 @@ xcrun clang \
   -o "$ROOT/.build/self-tests/CEuiccCoreSelfTests"
 
 "$ROOT/.build/self-tests/CEuiccCoreSelfTests"
+
+# The standalone IOKit tool is the only way to reach the module when the app
+# cannot run, or has written a configuration that stops it from connecting. It
+# links against ModemBridge.c, so it rots silently whenever that API changes —
+# which is exactly what had already happened, leaving no rescue path at all.
+# Compiling it here means that can never go unnoticed again.
+"$ROOT/scripts/build_diagnostic_tool.sh" >/dev/null
+print "Standalone diagnostic tool compiles"

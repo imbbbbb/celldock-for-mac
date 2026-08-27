@@ -1097,14 +1097,53 @@ final class ModemService {
         }
     }
 
+    /// Preconditions shared by every path that writes module configuration and
+    /// then restarts the module. Returns the reason to refuse, or nil to go on.
+    ///
+    /// Both `configureECM` and `performModeSwitch` end in AT+CFUN=1,1, so they
+    /// need the same guarantees. Keeping the checks in one place is what stops
+    /// them from drifting apart — which is exactly what had happened: the mode
+    /// switch had grown a full set of guards while the ECM path still only
+    /// looked at whether a call was up.
+    ///
+    /// Ordering matters here. The eSIM guard has to precede
+    /// `queryCallPresence()` because that one sends AT+CLCC, and an eSIM
+    /// session is a multi-step APDU exchange over the same channel.
+    private func restartPreflightFailure() -> String? {
+        guard !callSnapshot.hasCall,
+              !hasPendingMediaCleanup,
+              !callActionInFlight else {
+            return L10n.tr("通话或语音清理期间不能切换模块模式。")
+        }
+        // Defensive only: the serial queue already prevents interleaving with
+        // an eSIM exchange, since that runs entirely inside one block. Kept
+        // because an interrupted eSIM write is the one outcome on these paths
+        // that nothing can undo — a mis-written USBCFG can at least be
+        // rewritten, a bricked eUICC cannot.
+        guard !euiccOperationInFlight else {
+            return L10n.tr("eSIM 操作进行中，不能切换模块模式。")
+        }
+        guard case .empty = queryCallPresence() else {
+            return L10n.tr("无法确认模块中没有语音通话，未执行模式切换。")
+        }
+        return nil
+    }
+
     func configureECM(completion: @escaping (ModemActionResult) -> Void) {
         queue.async { [weak self] in
-            guard let self, self.isOpen else {
-                DispatchQueue.main.async { completion(.failure(L10n.tr("请先插入 QDC507 模块。"))) }
+            guard let self else {
+                DispatchQueue.main.async {
+                    completion(.failure(L10n.tr("请先插入 QDC507 模块。")))
+                }
                 return
             }
-            guard !self.callSnapshot.hasCall else {
-                DispatchQueue.main.async { completion(.failure(L10n.tr("通话期间不能重启或切换模块网络模式。"))) }
+            guard self.isOpen else {
+                let reason = self.moduleUnavailableReason()
+                DispatchQueue.main.async { completion(.failure(reason)) }
+                return
+            }
+            if let failure = self.restartPreflightFailure() {
+                DispatchQueue.main.async { completion(.failure(failure)) }
                 return
             }
 
@@ -1121,6 +1160,19 @@ final class ModemService {
             }
 
             let write = self.command("AT+QCFG=\"usbnet\",1", timeout: 5_000)
+            if write.isTransportAmbiguous {
+                // The write may well have landed and taken the AT interface
+                // down with it. Reporting it as a refusal would tell the user
+                // nothing changed, when in fact the module may already hold the
+                // new value — the same mistake the mode-switch path avoids.
+                self.beginExpectedModuleRestart()
+                DispatchQueue.main.async {
+                    completion(.failure(
+                        L10n.tr("配置写入响应不明确，CellDock 未自动重试；正在等待 USB 重新枚举并回读实际状态。")
+                    ))
+                }
+                return
+            }
             guard write.isSuccess else {
                 DispatchQueue.main.async {
                     completion(.failure(write.error ?? L10n.tr("模块拒绝切换到 CDC-ECM 模式。")))
@@ -1143,34 +1195,186 @@ final class ModemService {
     }
 
     func convertDJIModuleIdentity(completion: @escaping (ModemActionResult) -> Void) {
+        switchToMode(.macFull, completion: completion)
+    }
+
+    /// Switches the module to `target` as one transaction: check preconditions,
+    /// read the current state, unlock, write, read back field by field, and only
+    /// then restart.
+    ///
+    /// Idempotent by design. If the module already reports the target mode with
+    /// the required usbnet value, nothing is written at all — rewriting an
+    /// identical configuration gains nothing and costs one more opportunity to
+    /// get it wrong.
+    func switchToMode(
+        _ target: ModemMode,
+        completion: @escaping (ModemActionResult) -> Void
+    ) {
+        let startedAt = Date()
+        performModeSwitch(target) { result in
+            // `completion` is delivered on the main queue, so appending here is
+            // serialised with every other main-queue mutation. Refused and
+            // failed attempts are recorded too — those are the ones worth having
+            // when someone reports that a switch "did not work", because each
+            // failure branch carries its own wording.
+            ModeSwitchLogStore.append(
+                targetMode: target,
+                startedAt: startedAt,
+                result: result
+            )
+            completion(result)
+        }
+    }
+
+    private func performModeSwitch(
+        _ target: ModemMode,
+        completion: @escaping (ModemActionResult) -> Void
+    ) {
         queue.async { [weak self] in
-            guard let self, self.isOpen, let modem = self.modem else {
-                DispatchQueue.main.async { completion(.failure(L10n.tr("请先插入 DJI 4G 模块。"))) }
-                return
-            }
-            guard celldock_modem_vendor_id(modem) == 0x2CA3,
-                  celldock_modem_product_id(modem) == 0x4006,
-                  self.connectedModemMatchesExpectedIdentity() else {
+            // `completion` must fire on every path, including this one: the
+            // caller keeps a busy flag raised until it does, and never lowering
+            // it would disable mode switching for the rest of the session.
+            guard let self else {
                 DispatchQueue.main.async {
-                    completion(.failure(L10n.tr("当前 AT 接口不是已锁定的 2CA3:4006 模块，未执行转换。")))
+                    completion(.failure(L10n.tr("请先插入 QDC507 模块。")))
                 }
                 return
             }
-            guard !self.callSnapshot.hasCall,
-                  !self.hasPendingMediaCleanup,
-                  !self.callActionInFlight else {
-                DispatchQueue.main.async {
-                    completion(.failure(L10n.tr("通话或语音清理期间不能转换模块身份。")))
-                }
+            guard self.isOpen, let modem = self.modem else {
+                // Distinguish "no module" from "another program holds the AT
+                // interface" — the latter is a realistic case here, since
+                // DJOneHub drives the same module.
+                let reason = self.moduleUnavailableReason()
+                DispatchQueue.main.async { completion(.failure(reason)) }
                 return
             }
-            guard case .empty = self.queryCallPresence() else {
+
+            // Identify the module. Both the DJI identity and the converted
+            // Quectel identity are legitimate starting points — it is the same
+            // physical module either way, so neither may be refused here.
+            let vendorID = Int(celldock_modem_vendor_id(modem))
+            let productID = Int(celldock_modem_product_id(modem))
+            let isKnownIdentity = ModemMode.allCases.contains {
+                $0.configuration.vendorID == vendorID && $0.configuration.productID == productID
+            }
+            guard isKnownIdentity, self.connectedModemMatchesExpectedIdentity() else {
                 DispatchQueue.main.async {
-                    completion(.failure(L10n.tr("无法确认模块中没有语音通话，未执行转换。")))
+                    completion(.failure(L10n.tr("当前 AT 接口不是已知的 QDC507 模块，未执行模式切换。")))
                 }
                 return
             }
 
+            // Call, media-cleanup and eSIM preconditions, shared with
+            // `configureECM` so the two restart paths cannot drift apart again.
+            if let failure = self.restartPreflightFailure() {
+                DispatchQueue.main.async { completion(.failure(failure)) }
+                return
+            }
+
+            // Read the current configuration before touching anything.
+            let currentConfigurationResponse = self.command("AT+QCFG=\"USBCFG\"", timeout: 5_000)
+            guard currentConfigurationResponse.isSuccess,
+                  let currentConfiguration = ATResponseParser.parseUSBConfiguration(
+                      currentConfigurationResponse.output
+                  ) else {
+                DispatchQueue.main.async {
+                    completion(.failure(L10n.tr("无法读取当前 USBCFG，未执行模式切换。")))
+                }
+                return
+            }
+            let currentUSBNetResponse = self.command("AT+QCFG=\"usbnet\"", timeout: 5_000)
+            guard currentUSBNetResponse.isSuccess,
+                  let currentUSBNetMode = ATResponseParser.parseUSBNetMode(
+                      currentUSBNetResponse.output
+                  ),
+                  currentUSBNetMode == 0 || currentUSBNetMode == 1 else {
+                DispatchQueue.main.async {
+                    completion(.failure(L10n.tr("无法确认 usbnet 是 0 或 1，未执行模式切换。")))
+                }
+                return
+            }
+
+            // The source must be something CellDock has verified. The target is
+            // guaranteed to be whitelisted because `ModemMode` is the whitelist.
+            guard currentConfiguration.mode != nil
+                    || currentConfiguration.isSafeIdentityConversionSource else {
+                DispatchQueue.main.async {
+                    completion(.failure(L10n.tr("当前 USBCFG 不是已验证的配置，拒绝写入。")))
+                }
+                return
+            }
+
+            // Already there — do not write.
+            //
+            // The USBCFG read reports what is stored in NV, which is not
+            // necessarily what the module is currently enumerated as: a write
+            // only takes effect at the next restart. So matching the stored
+            // configuration is not proof the mode is live — the enumerated
+            // VID/PID has to agree with it as well.
+            //
+            // Without that check a switch whose restart never landed becomes
+            // unrecoverable: NV already holds the target, so every retry would
+            // short-circuit here and report success, while the module stays on
+            // the old identity forever. Letting it fall through instead skips
+            // the write (the configuration already matches) but still reaches
+            // the read-back and the restart, which is exactly what is missing.
+            if target.isLive(
+                storedConfiguration: currentConfiguration,
+                storedUSBNetMode: currentUSBNetMode,
+                enumeratedVendorID: vendorID,
+                enumeratedProductID: productID
+            ) {
+                DispatchQueue.main.async {
+                    completion(.success(L10n.tr("模块已处于目标模式，未写入任何配置。")))
+                }
+                return
+            }
+
+            // Turning USB audio on for firmware that cannot drive it is not
+            // recoverable from the host, so it is gated on the verified firmware
+            // table. `AT+QPCMV=?` is only consulted for firmware this build has
+            // never seen: on the verified QDC507 it advertises 0-2 while the
+            // actual QPCMV control commands return ERROR, so the advertisement
+            // is not evidence of anything.
+            let firmwareRevision = self.queryFirmwareRevision()
+
+            // Capture the current state as the rollback target before anything
+            // is overwritten. Only a recognised mode is stored: a snapshot of a
+            // half-written or unknown tuple would be a trap rather than a way
+            // back, and restoring into it could strand the module again.
+            if currentConfiguration.mode != nil {
+                ModeConfigurationSnapshotStore.record(
+                    ModeConfigurationSnapshot(
+                        configuration: currentConfiguration,
+                        usbNetMode: currentUSBNetMode,
+                        firmwareRevision: firmwareRevision,
+                        imei: self.snapshot.moduleIMEI,
+                        recordedAt: Date()
+                    )
+                )
+            }
+
+            if target.configuration.audioEnabled && !currentConfiguration.audioEnabled {
+                var advertisesUACMode: Bool?
+                if !ModemFirmwareCapability.isVerified(revision: firmwareRevision) {
+                    let pcmCapability = self.command("AT+QPCMV=?", timeout: 5_000)
+                    advertisesUACMode = pcmCapability.isSuccess
+                        ? ATResponseParser.normalizedLines(pcmCapability.output)
+                            .contains { $0.uppercased().hasPrefix("+QPCMV:") && $0.contains("0-2") }
+                        : nil
+                }
+                guard ModemFirmwareCapability.permitsEnablingUSBAudio(
+                    revision: firmwareRevision,
+                    advertisesUACMode: advertisesUACMode
+                ) else {
+                    DispatchQueue.main.async {
+                        completion(.failure(L10n.tr("固件未被验证支持 USB 通话音频，拒绝启用音频配置。")))
+                    }
+                    return
+                }
+            }
+
+            // Unlock. USBCFG does not accept a write until QADBKEY succeeds.
             let challengeResponse = self.command("AT+QADBKEY?", timeout: 3_000)
             guard challengeResponse.isSuccess,
                   let challenge = ATResponseParser.parseQADBKeyChallenge(challengeResponse.output),
@@ -1188,104 +1392,176 @@ final class ModemService {
                 return
             }
 
-            let usbConfigurationResponse = self.command("AT+QCFG=\"USBCFG\"", timeout: 5_000)
-            guard usbConfigurationResponse.isSuccess,
-                  let currentConfiguration = ATResponseParser.parseUSBConfiguration(
-                      usbConfigurationResponse.output
-                  ),
-                  currentConfiguration.isSafeIdentityConversionSource else {
-                DispatchQueue.main.async {
-                    completion(.failure(L10n.tr("当前 USBCFG 不是已验证的 DJI 原值、过渡值或 CellDock 目标值，拒绝写入。")))
+            var writeOutcome = ModeWriteDecision.WriteOutcome.succeeded
+
+            // usbnet is written first because it does not change the USB
+            // identity: if it fails, the module is left exactly as it was, and
+            // reporting "nothing changed" is then true.
+            //
+            // The other order is what makes that report a lie — writing USBCFG
+            // first and then failing on usbnet leaves a rewritten identity
+            // sitting in NV while the user is told nothing happened, and it
+            // takes effect at whatever restart comes next.
+            if currentUSBNetMode != target.requiredUSBNetMode {
+                let writeUSBNet = self.command(
+                    "AT+QCFG=\"usbnet\",\(target.requiredUSBNetMode)",
+                    timeout: 5_000
+                )
+                if writeUSBNet.isTransportAmbiguous {
+                    writeOutcome = .ambiguous
+                } else if !writeUSBNet.isSuccess {
+                    writeOutcome = .rejected(
+                        writeUSBNet.error ?? L10n.tr("CDC-ECM 写入失败；未重启模块。")
+                    )
                 }
-                return
             }
 
-            if !currentConfiguration.audioEnabled {
-                let pcmCapability = self.command("AT+QPCMV=?", timeout: 5_000)
-                let advertisesUACMode = ATResponseParser.normalizedLines(pcmCapability.output)
-                    .contains { $0.uppercased().hasPrefix("+QPCMV:") && $0.contains("0-2") }
-                guard pcmCapability.isSuccess, advertisesUACMode else {
-                    DispatchQueue.main.async {
-                        completion(.failure(L10n.tr("模块未报告 QPCMV 0-2 能力，拒绝启用 CellDock USB 音频配置。")))
-                    }
-                    return
-                }
-            }
-
-            let usbNetResponse = self.command("AT+QCFG=\"usbnet\"", timeout: 5_000)
-            guard usbNetResponse.isSuccess,
-                  let usbNetMode = ATResponseParser.parseUSBNetMode(usbNetResponse.output),
-                  usbNetMode == 0 || usbNetMode == 1 else {
-                DispatchQueue.main.async {
-                    completion(.failure(L10n.tr("无法确认 usbnet 是 0 或 1，未执行转换。")))
-                }
-                return
-            }
-
-            if !currentConfiguration.isCellDockTarget {
-                let targetCommand = ModemUSBConfiguration.maVoTarget.usbcfgWriteCommand
-                let write = self.command(targetCommand, timeout: 8_000)
+            // Write the complete target configuration in one command; never
+            // assemble it field by field.
+            if writeOutcome == .succeeded, currentConfiguration != target.configuration {
+                let write = self.command(target.configuration.usbcfgWriteCommand, timeout: 8_000)
                 if write.isTransportAmbiguous {
-                    self.beginExpectedModuleRestart()
-                    DispatchQueue.main.async {
-                        completion(.failure(
-                            L10n.tr("USBCFG 写入响应不明确，CellDock 未自动重试；正在等待 USB 重新枚举并回读实际状态。")
-                        ))
-                    }
-                    return
-                }
-                guard write.isSuccess else {
-                    DispatchQueue.main.async {
-                        completion(.failure(write.error ?? L10n.tr("模块拒绝转换 USB 身份。")))
-                    }
-                    return
-                }
-
-                let readBack = self.command("AT+QCFG=\"USBCFG\"", timeout: 5_000)
-                guard readBack.isSuccess,
-                      ATResponseParser.parseUSBConfiguration(readBack.output)?.isCellDockTarget == true else {
-                    DispatchQueue.main.async {
-                        completion(.failure(L10n.tr("USB 身份写入后的精确回读校验失败，未重启模块。")))
-                    }
-                    return
+                    writeOutcome = .ambiguous
+                } else if !write.isSuccess {
+                    writeOutcome = .rejected(
+                        write.error ?? L10n.tr("模块拒绝写入目标 USB 配置。")
+                    )
                 }
             }
 
-            if usbNetMode == 0 {
-                let writeUSBNet = self.command("AT+QCFG=\"usbnet\",1", timeout: 5_000)
-                guard writeUSBNet.isSuccess else {
-                    DispatchQueue.main.async {
-                        completion(.failure(writeUSBNet.error ?? L10n.tr("USB 身份已转换，但 CDC-ECM 写入失败；未重启。")))
-                    }
-                    return
-                }
-                let verifyUSBNet = self.command("AT+QCFG=\"usbnet\"", timeout: 5_000)
-                guard verifyUSBNet.isSuccess,
-                      ATResponseParser.parseUSBNetMode(verifyUSBNet.output) == 1 else {
-                    DispatchQueue.main.async {
-                        completion(.failure(L10n.tr("CDC-ECM 写入后的回读校验失败，未重启模块。")))
-                    }
-                    return
-                }
+            // The read-back is a closure so it is only issued on the one path
+            // where it means anything: after an ambiguous write the interface is
+            // probably gone, and more commands against it would tell us nothing.
+            let decision = ModeWriteDecision.decide(
+                target: target,
+                write: writeOutcome
+            ) {
+                let configurationResponse = self.command("AT+QCFG=\"USBCFG\"", timeout: 5_000)
+                let usbNetResponse = self.command("AT+QCFG=\"usbnet\"", timeout: 5_000)
+                return (
+                    configuration: configurationResponse.isSuccess
+                        ? ATResponseParser.parseUSBConfiguration(configurationResponse.output)
+                        : nil,
+                    usbNetMode: usbNetResponse.isSuccess
+                        ? ATResponseParser.parseUSBNetMode(usbNetResponse.output)
+                        : nil
+                )
             }
 
-            let finalConfiguration = self.command("AT+QCFG=\"USBCFG\"", timeout: 5_000)
-            guard finalConfiguration.isSuccess,
-                  ATResponseParser.parseUSBConfiguration(finalConfiguration.output)?.isCellDockTarget == true else {
+            switch decision {
+            case .indeterminate:
+                // The write may well have landed and taken the AT interface down
+                // as the module re-enumerated. Stop and read back once it
+                // returns; never write a second time against an unknown state.
+                self.beginExpectedModuleRestart()
                 DispatchQueue.main.async {
-                    completion(.failure(L10n.tr("重启前无法再次确认 CellDock USB 目标配置，已停止。")))
+                    completion(.failure(
+                        L10n.tr("USBCFG 写入响应不明确，CellDock 未自动重试；正在等待 USB 重新枚举并回读实际状态。")
+                    ))
                 }
-                return
-            }
-
-            self.snapshot.usbConfiguration = .maVoTarget
-            self.snapshot.usbNetMode = 1
-            _ = self.command("AT+CFUN=1,1", timeout: 1_000)
-            self.beginExpectedModuleRestart()
-            DispatchQueue.main.async {
-                completion(.success(L10n.tr("已转换为 2C7C:0125，并启用 ADB、USB 通话音频与 CDC-ECM，模块正在重新枚举。")))
+            case let .rejected(message):
+                DispatchQueue.main.async {
+                    completion(.failure(message ?? L10n.tr("模块拒绝写入目标 USB 配置。")))
+                }
+            case .verificationFailed:
+                // The write itself returned OK, so the module is now holding a
+                // configuration that does not match the target — and it will
+                // take effect at whatever restart comes next, including a
+                // simple unplug. Saying only "not restarted" would read as
+                // "nothing happened", which is the opposite of the truth and
+                // the one thing the user needs to know here.
+                //
+                // No automatic rollback: that would be another write against a
+                // module already in an unexpected state. Recovery goes through
+                // the normal transaction instead, where it gets the same
+                // unlock, read-back and verification as any other switch.
+                DispatchQueue.main.async {
+                    completion(.failure(L10n.tr(
+                        "写入后的精确回读校验失败，未重启模块。模块内可能已存有未生效的配置，重启后会生效——请先用「恢复」返回上一次已验证配置，暂不要拔插模块。"
+                    )))
+                }
+            case let .commit(verified):
+                self.commitVerifiedModeWrite(verified)
+                DispatchQueue.main.async {
+                    completion(.success(L10n.tr("已切换模块模式，模块正在重新枚举。")))
+                }
             }
         }
+    }
+
+    /// Restarts the module so a written configuration takes effect.
+    ///
+    /// Takes a `VerifiedModeWrite` rather than a mode, so this is unreachable
+    /// without a read-back that matched the target exactly.
+    private func commitVerifiedModeWrite(_ verified: VerifiedModeWrite) {
+        snapshot.usbConfiguration = verified.mode.configuration
+        snapshot.usbNetMode = verified.mode.requiredUSBNetMode
+        _ = command("AT+CFUN=1,1", timeout: 1_000)
+        beginExpectedModuleRestart()
+    }
+
+    /// Why the AT interface cannot be used right now.
+    ///
+    /// The interface is exclusive, and DJOneHub drives the same module, so
+    /// "another program is holding it" is a realistic cause rather than a
+    /// theoretical one. Reporting it as "insert the module" would send the user
+    /// looking in the wrong place entirely; naming the process turns an opaque
+    /// failure into something they can act on.
+    private func moduleUnavailableReason() -> String {
+        let notInserted = L10n.tr("请先插入 QDC507 模块。")
+
+        // `modemLocationID` is only populated once an AT port has been opened
+        // successfully — which is precisely what has *not* happened when
+        // another program is holding the interface. Relying on it would make
+        // this check dead in the only situation it exists for, so enumerate
+        // IOKit directly instead.
+        var locationIDs: [UInt32] = []
+        if modemLocationID != 0 {
+            locationIDs = [modemLocationID]
+        } else {
+            let discovered = celldock_modem_copy_devices(nil, 0)
+            guard discovered > 0 else { return notInserted }
+            var devices = [CellDockModemDevice](
+                repeating: CellDockModemDevice(),
+                count: discovered
+            )
+            let copied = celldock_modem_copy_devices(&devices, discovered)
+            locationIDs = devices.prefix(copied).map(\.location_id)
+        }
+
+        for locationID in locationIDs where locationID != 0 {
+            var ownerProcessID: Int32 = 0
+            var nameBuffer = [CChar](repeating: 0, count: 256)
+            // Interface 2 is the AT port; see CELLDOCK_AT_INTERFACE in
+            // ModemBridge.c.
+            let hasOwner = celldock_usb_interface_owner_process(
+                locationID,
+                2,
+                &ownerProcessID,
+                &nameBuffer,
+                nameBuffer.count
+            ) == 1
+            // CellDock itself owns the interface whenever it has the port open,
+            // so only a *different* process indicates contention.
+            guard hasOwner, ownerProcessID != getpid() else { continue }
+
+            let ownerName = String(cString: nameBuffer)
+            return ownerName.isEmpty
+                ? L10n.tr("AT 接口可能正被其他程序占用，请先退出该程序。")
+                : L10n.tr("AT 接口可能正被「%@」占用，请先退出该程序再切换模式。", ownerName)
+        }
+
+        return notInserted
+    }
+
+    /// Reads the firmware revision reported by `AT+QGMR`, used to look up the
+    /// verified media backend. Returns nil when the module does not answer.
+    private func queryFirmwareRevision() -> String? {
+        let response = command("AT+QGMR", timeout: 3_000)
+        guard response.isSuccess else { return nil }
+        return ModemFirmwareCapability.revision(
+            fromResponseLines: ATResponseParser.normalizedLines(response.output)
+        )
     }
 
     func setIncomingCallsEnabled(
@@ -2124,6 +2400,31 @@ final class ModemService {
     }
 
     @discardableResult
+    /// Releases the call media path on demand.
+    ///
+    /// This is the recovery page's escape hatch for the exact situation the
+    /// normal ordering exists to prevent: the Mac's microphone or speaker still
+    /// held after a call that ended badly. It deliberately runs the same
+    /// cleanup as the ordinary end-of-call path — host side first, module side
+    /// after — so it cannot leave the state machine anywhere the normal path
+    /// would not. A module-side failure is not fatal: the host audio is already
+    /// free by then, and the pending flag makes the background retry pick it up.
+    func forceReleaseCallAudio(completion: @escaping (ModemActionResult) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let fullyClean = self.cleanupCallMedia()
+            self.callSnapshot.audioActive = false
+            self.publishCallSnapshot()
+            DispatchQueue.main.async {
+                completion(
+                    fullyClean
+                        ? .success(L10n.tr("已释放通话音频。"))
+                        : .failure(L10n.tr("Mac 音频已释放；模块侧清理尚未完成，将在后台重试。"))
+                )
+            }
+        }
+    }
+
     private func cleanupCallMedia() -> Bool {
         cancelPendingQDCMediaSession()
         let audioStopped = stopVoiceAudioAndWait()
@@ -2745,6 +3046,11 @@ final class ModemService {
         snapshot.usbNetMode = ATResponseParser.parseUSBNetMode(usbNet.output)
         let usbConfiguration = command("AT+QCFG=\"USBCFG\"", timeout: 3_000)
         snapshot.usbConfiguration = ATResponseParser.parseUSBConfiguration(usbConfiguration.output)
+        // Firmware does not change while the module stays connected, so this is
+        // queried once rather than on every refresh tick.
+        if snapshot.firmwareRevision == nil {
+            snapshot.firmwareRevision = queryFirmwareRevision()
+        }
         let ims = command("AT+QCFG=\"ims\"", timeout: 3_000)
         snapshot.imsMode = ATResponseParser.parseIMSMode(ims.output)
         snapshot.volteSessionAvailable = ATResponseParser.parseVoLTESessionAvailable(ims.output)
