@@ -438,12 +438,13 @@ struct CellDockSettingsView: View {
                         title: L10n.tr("自动检查更新"),
                         detail: updaterManager.currentVersion
                     ) {
-                        Toggle("自动检查更新", isOn: Binding(
-                            get: { updaterManager.automaticallyChecksForUpdates },
-                            set: { updaterManager.automaticallyChecksForUpdates = $0 }
-                        ))
-                        .labelsHidden()
-                        .toggleStyle(.adaptiveGlass)
+                        // Shown off and disabled rather than hidden: leaving a
+                        // live-looking switch that silently does nothing is
+                        // worse than saying plainly that updates are off.
+                        Toggle("自动检查更新", isOn: .constant(false))
+                            .labelsHidden()
+                            .toggleStyle(.adaptiveGlass)
+                            .disabled(true)
                     }
                     .padding(16)
 
@@ -451,9 +452,7 @@ struct CellDockSettingsView: View {
 
                     settingRow(
                         title: L10n.tr("更新频道"),
-                        detail: updaterManager.channel == .stable
-                            ? L10n.tr("仅接收经过验证的正式版本")
-                            : L10n.tr("提前体验新功能，可能不够稳定")
+                        detail: L10n.tr("此版本不使用官方更新源")
                     ) {
                         Picker("更新频道", selection: $updaterManager.channel) {
                             ForEach(UpdateChannel.allCases) { channel in
@@ -463,6 +462,7 @@ struct CellDockSettingsView: View {
                         .labelsHidden()
                         .pickerStyle(.segmented)
                         .frame(width: 180)
+                        .disabled(true)
                     }
                     .padding(16)
 
@@ -470,7 +470,7 @@ struct CellDockSettingsView: View {
 
                     settingRow(
                         title: L10n.tr("立即检查"),
-                        detail: L10n.tr("从 CellDock 官方服务器检查并验证更新")
+                        detail: L10n.tr("官方更新源提供的版本不含本地改动，安装会覆盖它们。如需更新请从源码重新构建。")
                     ) {
                         Button("检查更新…") {
                             updaterManager.checkForUpdates()
