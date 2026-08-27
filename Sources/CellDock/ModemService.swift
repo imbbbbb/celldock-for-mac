@@ -2399,7 +2399,6 @@ final class ModemService {
         return fullyClean
     }
 
-    @discardableResult
     /// Releases the call media path on demand.
     ///
     /// This is the recovery page's escape hatch for the exact situation the
@@ -2411,7 +2410,14 @@ final class ModemService {
     /// free by then, and the pending flag makes the background retry pick it up.
     func forceReleaseCallAudio(completion: @escaping (ModemActionResult) -> Void) {
         queue.async { [weak self] in
-            guard let self else { return }
+            // Fire on every path, as everywhere else that takes a completion:
+            // callers are entitled to exactly one answer.
+            guard let self else {
+                DispatchQueue.main.async {
+                    completion(.failure(L10n.tr("请先插入 QDC507 模块。")))
+                }
+                return
+            }
             let fullyClean = self.cleanupCallMedia()
             self.callSnapshot.audioActive = false
             self.publishCallSnapshot()
@@ -2425,6 +2431,7 @@ final class ModemService {
         }
     }
 
+    @discardableResult
     private func cleanupCallMedia() -> Bool {
         cancelPendingQDCMediaSession()
         let audioStopped = stopVoiceAudioAndWait()
