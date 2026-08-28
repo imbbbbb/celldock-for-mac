@@ -160,8 +160,36 @@ struct ModemUSBConfiguration: Equatable, Codable {
         ModemMode.allCases.first { $0.configuration == self }
     }
 
+    /// Whether CellDock may offer to repair this configuration by switching to
+    /// a real mode.
+    ///
+    /// This deliberately does not enumerate known configurations. A switch
+    /// writes the complete target USBCFG — identity and all seven flags — in a
+    /// single command, so nothing about the source's flags constrains the
+    /// write. The only thing that matters is that this really is a QDC507 we
+    /// can still reach.
+    ///
+    /// Enumerating exact values is what stranded 2CA3:4006 with audio=1: its
+    /// flags matched a known transitional value but its identity did not, so it
+    /// matched no entry and was refused — even though switching it is a single
+    /// ordinary write, and refusing left no way to repair it from the app.
+    ///
+    /// This must not require `atPortEnabled` either. A USBCFG read reports NV,
+    /// not the live configuration, so a module can answer AT right now while
+    /// its stored config would drop the AT port at the next restart. That
+    /// module is exactly the one that has to be allowed to write a good config
+    /// while it still can.
     var isSafeIdentityConversionSource: Bool {
-        isSafeDJISource || self == Self.maVoTargetWithoutADB || isCellDockTarget
+        isKnownQDC507Identity
+    }
+
+    /// The two identities a QDC507 enumerates as: the DJI factory identity, and
+    /// the Quectel identity CellDock switches it to.
+    var isKnownQDC507Identity: Bool {
+        ModemMode.allCases.contains {
+            $0.configuration.vendorID == vendorID
+                && $0.configuration.productID == productID
+        }
     }
 
     var identity: String {

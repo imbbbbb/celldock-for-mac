@@ -1138,6 +1138,50 @@ do {
         ).initialSetupState == .needsIdentityConversion,
         "physical DJI identity with the exact transition tuple could not resume conversion"
     )
+    // A real module reported this: the DJI factory identity with audio on. Its
+    // flag tuple matches the transitional value above, but its identity does
+    // not, so the old enumeration of exact configurations matched no entry and
+    // refused it — both at the setup screen and again inside performModeSwitch,
+    // leaving the recovery page unable to repair it either. The source's flags
+    // are irrelevant to a switch, which rewrites all of them in one command.
+    let djiWithAudioConfiguration = ATResponseParser.parseUSBConfiguration(
+        "+QCFG: \"usbcfg\",0x2CA3,0x4006,1,1,1,1,1,0,1\r\nOK"
+    )
+    try expect(
+        djiWithAudioConfiguration?.mode == nil,
+        "DJI identity with audio=1 must not be mistaken for a real mode"
+    )
+    try expect(
+        djiWithAudioConfiguration?.isSafeIdentityConversionSource == true,
+        "DJI identity with audio=1 was refused as a conversion source"
+    )
+    try expect(
+        ModemSnapshot(
+            state: .connected,
+            usbIdentity: "2CA3:4006",
+            usbNetMode: 1,
+            usbConfiguration: djiWithAudioConfiguration
+        ).initialSetupState == .needsIdentityConversion,
+        "DJI identity with audio=1 was stranded outside the setup screen"
+    )
+    // The NV-versus-live distinction: a stored config that would drop the AT
+    // port at the next restart is exactly the one that must still be repairable
+    // while the module currently answers.
+    let atPortDisabledConfiguration = ATResponseParser.parseUSBConfiguration(
+        "+QCFG: \"usbcfg\",0x2C7C,0x125,1,1,0,1,1,1,1\r\nOK"
+    )
+    try expect(
+        atPortDisabledConfiguration?.isSafeIdentityConversionSource == true,
+        "a pending AT-port-less config was refused, removing its only repair path"
+    )
+    // An identity CellDock has never verified stays refused.
+    let foreignConfiguration = ATResponseParser.parseUSBConfiguration(
+        "+QCFG: \"usbcfg\",0x1234,0x5678,1,1,1,1,1,1,1\r\nOK"
+    )
+    try expect(
+        foreignConfiguration?.isSafeIdentityConversionSource == false,
+        "an unknown USB identity was accepted as a conversion source"
+    )
     let maVoUSBConfiguration = ATResponseParser.parseUSBConfiguration(
         "+QCFG: \"usbcfg\",0x2C7C,0x125,1,1,1,1,1,1,1\r\nOK"
     )
@@ -1686,6 +1730,14 @@ do {
         ) == nil,
         "noise with no revision present still produced one"
     )
+    // This assertion used to require the opposite: an unrecognized flag tuple on
+    // the DJI identity had to be refused conversion. That premise was wrong, and
+    // it is what stranded a real module reporting 2CA3:4006 with audio=1.
+    //
+    // A switch writes the complete target USBCFG in one command, so no flag in
+    // the source reaches the write and none of them can make it less safe. What
+    // has to be verified is the identity, which is checked here and again in
+    // performModeSwitch; the assertion below covers an identity that fails it.
     try expect(
         ModemSnapshot(
             state: .connected,
@@ -1702,8 +1754,27 @@ do {
                 adbEnabled: true,
                 audioEnabled: false
             )
-        ).initialSetupState != .needsIdentityConversion,
-        "unknown DJI interface tuple was offered conversion"
+        ).initialSetupState == .needsIdentityConversion,
+        "an unusual tuple on a known identity was left with no way to be repaired"
+    )
+    try expect(
+        ModemSnapshot(
+            state: .connected,
+            usbIdentity: "1234:5678",
+            usbNetMode: 1,
+            usbConfiguration: ModemUSBConfiguration(
+                vendorID: 0x1234,
+                productID: 0x5678,
+                diagnosticEnabled: true,
+                nmeaEnabled: true,
+                atPortEnabled: true,
+                modemEnabled: true,
+                networkEnabled: true,
+                adbEnabled: true,
+                audioEnabled: true
+            )
+        ).initialSetupState == .unsupportedIdentity("1234:5678"),
+        "an unknown USB identity was offered conversion"
     )
     try expect(ATResponseParser.parseCSQ("+CSQ: 20,99\r\nOK") == -73, "CSQ conversion")
     try expect(

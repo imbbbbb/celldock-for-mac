@@ -4,12 +4,6 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh-Hans</string>
-	<!--
-	  Display name only. CFBundleIdentifier stays app.celldock.mac on purpose:
-	  it anchors the TCC grants, the on-disk message store, the Keychain items
-	  and the privileged helper's designated requirement, so renaming it would
-	  discard all of them for no functional gain.
-	-->
 	<key>CFBundleDisplayName</key>
 	<string>CellDock Modes</string>
 	<key>CFBundleExecutable</key>
@@ -32,16 +26,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.4.0-modes.1</string>
-	<!--
-	  Deliberately far above anything upstream will publish. SUFeedURL still
-	  points at the upstream appcast, so a normal build number would let an
-	  upstream release install itself over this fork and take every change in
-	  it with it. Sparkle compares CFBundleVersion, so keeping it high means
-	  the check always concludes "already current".
-	-->
+	<string>0.4.1-modes.2</string>
 	<key>CFBundleVersion</key>
-	<string>90001</string>
+	<string>90002</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -54,19 +41,10 @@
 	<string>Copyright © 2026 CellDock contributors</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>用于通过蜂窝模块在 Mac 上进行语音通话。</string>
-	<key>SUEnableInstallerLauncherService</key>
-	<true/>
-	<!--
-	  No SUFeedURL on purpose. This fork must never be offered an upstream
-	  release as an "update" — installing one would replace it with the build
-	  it was forked from and discard the entire multi-mode rework.
-
-	  The authoritative switch is UpdaterManager: it does not start the updater
-	  and its feedURLString delegate returns nil, which overrides this file
-	  either way. Removing the key here keeps the two consistent.
-	-->
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
 	<key>SUPublicEDKey</key>
 	<string>9H4Cz4KZOY3eW5N8P14C7K9gJU9yW2W/FSyzUtuWrow=</string>
 </dict>
