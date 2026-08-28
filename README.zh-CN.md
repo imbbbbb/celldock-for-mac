@@ -4,35 +4,146 @@
   <img src="Resources/app_icon.png" width="128" height="128" alt="CellDock 图标">
 </p>
 
-<h1 align="center">CellDock</h1>
+<h1 align="center">CellDock Modes</h1>
 
 <p align="center">
-  在 Mac 上使用蜂窝网络、短信和电话。
+  在 Mac 上使用蜂窝网络、短信和电话 —— 并让同一块模块在 Mac、iPhone/iPad 与大疆设备之间自由切换。
 </p>
 
-<p align="center">
-  <sub>界面预览 · 点击图片查看原图</sub>
-</p>
+---
 
-| 短信 | 电话 |
-| :---: | :---: |
-| <a href="screenshot/1. sms.png"><img src="screenshot/1. sms.png" width="320" alt="短信"></a> | <a href="screenshot/2. call.png"><img src="screenshot/2. call.png" width="320" alt="电话"></a> |
+> ### 关于本项目
+>
+> 这是 [**celldock/celldock-for-mac**](https://github.com/celldock/celldock-for-mac) 的二次开发版本。
+>
+> 原项目完成了绝大部分工作 —— 蜂窝网络接管、短信、通话与录音、SOCKS5 代理、eSIM 管理、
+> 多模块调度，这些都是原作者的成果。本分支只是在这个已经相当完整的基础上，解决了一类
+> 我在自己使用中遇到的问题：**模块身份的单向改写**。
+>
+> 衷心感谢原作者的开源工作。没有那份地基，本分支不可能存在。
+>
+> 本分支为个人使用而做，遵循原项目的[非商业使用许可](LICENSE)。它**不是**官方版本，
+> 遇到问题请先在本仓库反馈，不要打扰原项目的维护者。
 
-| 通话中 | 通话中 |
-| :---: | :---: |
-| <a href="screenshot/2.1 calling.png"><img src="screenshot/2.1 calling.png" width="320" alt="通话中"></a> | <a href="screenshot/2.2 calling.png"><img src="screenshot/2.2 calling.png" width="320" alt="通话中"></a> |
+## 为什么会有这个分支
 
-| 录音 | 代理 |
-| :---: | :---: |
-| <a href="screenshot/3.records.png"><img src="screenshot/3.records.png" width="320" alt="录音"></a> | <a href="screenshot/4. proxy.png"><img src="screenshot/4. proxy.png" width="320" alt="代理"></a> |
+原项目在初始化时会把大疆 QDC507 模块的出厂 USB 身份**一次性、不可逆**地改写：
 
-| 设备 | 设置 |
-| :---: | :---: |
-| <a href="screenshot/5. device.png"><img src="screenshot/5. device.png" width="320" alt="设备"></a> | <a href="screenshot/6. settings.png"><img src="screenshot/6. settings.png" width="320" alt="设置"></a> |
+```
+出厂    2CA3:4006   USBCFG = 1,1,1,1,1,0,0
+        ↓  单向改写，无法回退
+改写后  2C7C:0125   USBCFG = 1,1,1,1,1,1,1
+```
 
-CellDock 是一款原生 macOS 菜单栏应用，用于连接 QDC507 蜂窝模组。插入模组后，
-你可以直接在 Mac 上使用蜂窝网络、收发短信、管理通讯录、拨打电话、保存通话录音，
-或把指定模组的蜂窝连接作为 SOCKS5 代理共享，无需浏览器服务或额外的通信软件。
+这次改写在 Mac 上是必要的，但带来两个后果：
+
+1. **末位 `audio=1` 让模块枚举出 USB 声卡。** 把模块改接到 iPhone/iPad 上时，iOS 会把它
+   当成外接音频设备并**抢占系统音频输出** —— 而在移动设备上，我只想用它上网。
+2. **VID/PID 变了以后，大疆自家的 DJOneHub 再也找不到这块模块。** 想装回无人机上，没有退路。
+
+问题不在硬件，而在于软件把「转换」当成了终态，而不是一个可以来回切换的状态。
+本分支把它改造成了三种可逆模式。
+
+## 本分支的主要改动
+
+### 一、三模式可逆切换（核心）
+
+| 模式 | USB 身份 | USBCFG | 用途 |
+| --- | --- | --- | --- |
+| **Mac 完整模式** | `2C7C:0125` | `1,1,1,1,1,1,1` | 上网 + 短信 + 通话 + 录音 |
+| **iPhone / iPad 纯数据模式** | `2C7C:0125` | `1,1,1,1,1,1,0` | 仅蜂窝上网，**不枚举声卡**，不抢占 iOS 音频 |
+| **DJI 原厂模式** | `2CA3:4006` | `1,1,1,1,1,0,0` | 恢复出厂身份，可被 DJOneHub 识别 |
+
+三种模式之间可以任意来回切换，不再是有去无回。字段序为
+`diag, nmea, AT, modem, rmnet, ADB, audio`；三种模式的 `usbnet` 恒为 1。
+
+### 二、写入安全
+
+改写 USB 配置写错一次就可能让模块从系统里消失，所以这部分做了几层防护：
+
+- **回读未通过则无法重启。** 提交重启（`AT+CFUN=1,1`）只接受一个由回读校验阶段产出的
+  凭据对象。「回读没通过却重启了」在**编译期就无法表达**，而不是靠运行时的 if 判断。
+- **写入后断线不再当作失败重写。** 写完 USBCFG 后模块可能立即重新枚举、AT 口消失 ——
+  此时配置很可能**已经写成功了**。重写是危险的。现在进入 `indeterminate` 状态：只读不写，
+  等重新枚举后读回实际状态再判定。
+- **白名单校验。** 目标配置必须精确命中上表三者之一，不允许运行时拼装；解析 USBCFG 时
+  字段数必须为 7，否则拒绝。
+- **目标与当前一致时直接跳过**，不做无谓写入。
+- **配置快照按 IMEI 记录**（跨模式稳定），而不是按会变的 VID/PID。
+
+### 三、恢复与诊断页
+
+新增一个任何状态下都能进入的页面 —— 包括 USBCFG 无法识别、但 AT 口仍能通信的
+`degraded` 状态。原项目在这种情况下会把模块拦在初始化页之外，救不回来。
+
+页面提供：当前 USB 身份、完整 USBCFG、usbnet、固件版本、IMEI、ADB 与 UAC 状态、
+最近的配置快照与写入/回读结果、模式切换日志；操作上支持切换到任一模式、
+**一键恢复上次已验证配置**、导出诊断报告。
+
+### 四、固件能力判定不再采信设备的自我声明
+
+实测发现模块的能力声明**不可信**：
+
+```
+AT+QPCMV=?    → +QPCMV: (0,1),(0-2)     ← 声称支持
+AT+QPCMV?     → ERROR                    ← 实际不可用
+AT+QPCMV=0    → ERROR
+```
+
+因此媒体后端分型改为依据**已验证固件白名单**，不在表内的固件保守拒绝发送相关命令，
+而不是听信 `AT+QPCMV=?` 的回复。
+
+### 五、修复的原项目缺陷
+
+- **麦克风与通讯录权限弹窗根本不出现。** 缺少 Hardened Runtime 的
+  `com.apple.security.device.audio-input` 与 `.personal-information.addressbook` 声明，
+  系统会直接拒绝，请求连弹窗都到不了用户面前。已补上 entitlements。
+- **`audio=0` 的模块被拦在初始化页之外**，无法进入应用（上文第三点的直接来源）。
+- **`script/build_and_run.sh` 构建出的 app 启动即被 dyld 终止** —— 未嵌入
+  `Sparkle.framework`，而二进制的 rpath 指向它。同时该脚本的 helper plist 路径与
+  codesign identifier 仍停留在改名前的 `app.mavo.*`，且未拷贝 Sounds 与 svg 资源。
+- **`tools/qdc507_iokit_tool.c` 无法编译** —— 仍在调用已改名的 `mavo_modem_*` 旧 API，
+  导致模块出问题时没有独立的 AT 救援工具可用。已修复，并纳入测试脚本以免再次腐化。
+
+### 六、其他新增与改进
+
+- **模块备注。** 按 IMEI 保存用户自定义标签，多模块时一眼看出哪块是哪块。
+- **短信会话右键删除**，与通话记录的交互保持一致。
+- **AT 终端修复**：输入框可以用鼠标拖选整段文字、新增「复制全部」、
+  修正切换到其他页面后焦点环残留。
+- **停用 Sparkle 自动更新。** 官方更新源提供的是不含本分支改动的版本，装上会把改动全部
+  覆盖。更新入口改为明确显示「已停用」，而不是留着无效控件。
+- **`scripts/make_dmg.sh`**：一条命令产出可直接安装的 DMG。
+
+### 验证状态
+
+已在真机验证：QDC507 模块，固件 `QDC507GLEFM21_01.001.01.007`。
+三模式的识别、进入、反复可逆切换，以及 DJI 原厂模式被 DJOneHub 重新识别，均已实测通过。
+
+写入失败分支（回读不一致、断线）由单元测试覆盖，未在真机上制造故障复现。
+多模块并发场景因手头只有一块模块，未做实测。
+
+## 安装
+
+本仓库不提供预编译发行版。自行构建：
+
+```bash
+git clone https://github.com/imbbbbb/celldock-for-mac.git
+cd celldock-for-mac
+./scripts/make_dmg.sh          # 产出 outputs/CellDock-<版本>-arm64.dmg
+```
+
+需要 macOS 14+ 与 Xcode 命令行工具。
+
+> **关于签名**：如果你的机器上没有 Apple 开发者证书，产出的 DMG 是 ad-hoc 签名的。
+> 本机安装无碍，但这个 DMG 一旦经网络传输给别人，macOS 会提示应用**「已损坏」** ——
+> 文件其实是完好的，这只是未签名软件被 quarantine 后的标准提示（措辞很容易让人误以为
+> 下载出错）。绕过方式写在 DMG 内的说明文件里：在访达中右键「打开」，或执行
+> `xattr -dr com.apple.quarantine "/Applications/CellDock Modes.app"`。
+
+---
+
+以下为原项目的功能介绍，本分支未作改动。
 
 ## 主要功能
 
@@ -105,14 +216,47 @@ CellDock 是一款原生 macOS 菜单栏应用，用于连接 QDC507 蜂窝模�
 - 可打开标准主窗口；关闭窗口后继续在菜单栏运行。
 - 可选择模组未插入时隐藏菜单栏图标。
 - 可选择登录 Mac 时自动启动，默认关闭。
-- 内置稳定版和测试版更新频道，可自动检查或手动检查更新。
+- ~~内置稳定版和测试版更新频道~~ —— 本分支已停用，见上文。
+
+## 界面预览
+
+<p align="center">
+  <sub>点击图片查看原图</sub>
+</p>
+
+| 短信 | 电话 |
+| :---: | :---: |
+| <a href="screenshot/1. sms.png"><img src="screenshot/1. sms.png" width="320" alt="短信"></a> | <a href="screenshot/2. call.png"><img src="screenshot/2. call.png" width="320" alt="电话"></a> |
+
+| 通话中 | 通话中 |
+| :---: | :---: |
+| <a href="screenshot/2.1 calling.png"><img src="screenshot/2.1 calling.png" width="320" alt="通话中"></a> | <a href="screenshot/2.2 calling.png"><img src="screenshot/2.2 calling.png" width="320" alt="通话中"></a> |
+
+| 录音 | 代理 |
+| :---: | :---: |
+| <a href="screenshot/3.records.png"><img src="screenshot/3.records.png" width="320" alt="录音"></a> | <a href="screenshot/4. proxy.png"><img src="screenshot/4. proxy.png" width="320" alt="代理"></a> |
+
+| 设备 | 设置 |
+| :---: | :---: |
+| <a href="screenshot/5. device.png"><img src="screenshot/5. device.png" width="320" alt="设备"></a> | <a href="screenshot/6. settings.png"><img src="screenshot/6. settings.png" width="320" alt="设置"></a> |
+
+> 以上截图来自原项目，尚未包含本分支新增的模式切换与恢复页面。
 
 ## 鸣谢
 
-特别感谢 [moluncn/mavo](https://github.com/moluncn/mavo) 项目。CellDock 在界面与功能设计上参考了 mavo，得益于原作者的开源工作，特此鸣谢。
+- [**celldock/celldock-for-mac**](https://github.com/celldock/celldock-for-mac) —— 本分支的
+  直接上游。整个应用的架构、蜂窝网络接管、短信与通话链路、eSIM 管理、SOCKS5 代理
+  都出自原作者之手。本分支的改动占比很小，绝大部分功劳属于他们。
+- [**moluncn/mavo**](https://github.com/moluncn/mavo) —— 上游项目在界面与功能设计上
+  参考了 mavo，这份感谢一并向上传递。
 
 ## 免责声明
 
+- 本分支是个人为自用而做的二次开发，**不是官方版本**，未经原作者审阅或背书。
+  相关问题请在本仓库反馈，不要提交到原项目。
+- **切换模块模式会改写模块的 USB 配置并重启模块。** 尽管已做了上文所述的多层防护，
+  改写固件配置终究存在风险。请在理解相关操作的前提下使用，作者不对模块损坏或功能
+  异常承担责任。
 - CellDock 按“现状”提供，不附带任何明示或默示的担保，作者不对其适用性或特定用途表现作任何保证。
 - 本软件会修改 macOS 的网络配置（例如将蜂窝网络设为优先出口、安装网络辅助组件），可能影响既有网络连接，使用前请确认了解相关功能。
 - 蜂窝网络、短信、电话与 eSIM 等功能的可用性受模组固件、SIM 卡、运营商及当地网络环境影响，作者不保证其在所有环境下的可用性或表现。
@@ -122,6 +266,6 @@ CellDock 是一款原生 macOS 菜单栏应用，用于连接 QDC507 蜂窝模�
 
 ## 许可证
 
-CellDock 应用代码使用[非商业使用许可](LICENSE)：个人和非商业用途可免费使用、
-修改与分发；**禁止任何形式的商业使用**，商业使用需另行获得作者书面授权。
+沿用上游的[非商业使用许可](LICENSE)：个人和非商业用途可免费使用、修改与分发；
+**禁止任何形式的商业使用**，商业使用需另行获得**原作者**书面授权 —— 本分支无权代为授予。
 第三方组件及其许可证说明见 [THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md)。
