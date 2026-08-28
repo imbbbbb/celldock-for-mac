@@ -144,6 +144,13 @@ Verified on real hardware: a QDC507 module running firmware
 repeated reversible switching, and DJOneHub re-recognizing the module in DJI Stock mode
 were all confirmed on-device.
 
+**Configurations outside the three modes are repairable too**, confirmed on hardware: a
+module reporting `2CA3:4006,1,1,1,1,1,0,1` — the DJI factory identity with USB audio
+enabled — was restored by switching to any mode. A switch writes the complete target
+USBCFG, and no flag from the source enters that write, so any module whose USB identity is
+a known QDC507 and whose AT port answers can be repaired — even from a configuration that
+has never been verified.
+
 The write-failure branches (read-back mismatch, dropped link) are covered by unit tests;
 they were not reproduced by inducing real faults. Multi-module concurrency is untested —
 I only have one module.
