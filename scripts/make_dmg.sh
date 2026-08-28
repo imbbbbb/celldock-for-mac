@@ -151,32 +151,59 @@ trap '/bin/rm -rf -- "$STAGING"' EXIT
 ditto "$APP_BUNDLE" "$STAGING/$DISPLAY_NAME.app"
 ln -s /Applications "$STAGING/Applications"
 
-if [[ "$ADHOC" == true ]]; then
-  cat > "$STAGING/请先阅读.txt" <<'README'
+# The upstream licence requires its notice to travel with every copy. Once this
+# image is published as a release it reaches people who have seen no other part
+# of the repository, so the licence has to be inside the image itself.
+cp "$ROOT_DIR/LICENSE" "$STAGING/LICENSE.txt"
+
+{
+  cat <<'HEADER'
 CellDock Modes — 安装说明
 
-1. 把 CellDock Modes 拖到 Applications 文件夹。
+本软件是 celldock/celldock-for-mac 的二次开发版本，绝大部分功能由原作者
+完成，特此致谢。使用遵循其非商业使用许可，全文见同目录 LICENSE.txt：
+个人和非商业用途可自由使用，禁止任何形式的商业使用。
 
-2. 首次打开会被系统拦下。这个版本没有 Apple 开发者证书签名，
-   所以 macOS 会说它"已损坏"——文件其实是完好的，这只是未签名
-   软件从网络下载后的标准提示。
+  原项目  https://github.com/celldock/celldock-for-mac
+  本分支  https://github.com/imbbbbb/celldock-for-mac
 
-   绕过方法（任选其一）：
+【安装】
 
-   a) 在"访达"里右键点击 CellDock Modes，选"打开"，
-      再在弹窗里点"打开"。之后就能正常双击启动了。
+把 CellDock Modes 拖到 Applications 文件夹。
+HEADER
 
-   b) 在"终端"里执行：
-      xattr -dr com.apple.quarantine "/Applications/CellDock Modes.app"
+  if [[ "$ADHOC" == true ]]; then
+    cat <<'QUARANTINE'
 
-3. 首次启动会请求麦克风和通讯录权限。麦克风用于通话，
-   通讯录用于在短信和来电中显示联系人姓名。都可以拒绝，
-   只是相应功能不可用。
+【首次打开会被系统拦下】
 
-关于更新：此版本停用了自动更新。官方更新源提供的是不含本地
-改动的版本，装上会覆盖它们。如需更新请从源码重新构建。
-README
-fi
+这个版本没有 Apple 开发者证书签名，所以 macOS 会说它"已损坏"——
+文件其实是完好的，这只是未签名软件从网络下载后的标准提示，措辞容易
+让人误以为下载出错。
+
+绕过方法（任选其一）：
+
+  a) 在"访达"里右键点击 CellDock Modes，选"打开"，再在弹窗里点
+     "打开"。之后就能正常双击启动了。
+
+  b) 在"终端"里执行：
+     xattr -dr com.apple.quarantine "/Applications/CellDock Modes.app"
+QUARANTINE
+  fi
+
+  cat <<'FOOTER'
+
+【权限】
+
+首次启动会请求麦克风和通讯录权限。麦克风用于通话，通讯录用于在短信和
+来电中显示联系人姓名。都可以拒绝，只是相应功能不可用。
+
+【更新】
+
+此版本停用了自动更新。官方更新源提供的是不含本分支改动的版本，装上会
+把改动全部覆盖。如需更新请从源码重新构建。
+FOOTER
+} > "$STAGING/请先阅读.txt"
 
 /bin/rm -f -- "$DMG_PATH"
 hdiutil create \
